@@ -1,0 +1,32 @@
+# Data and model weights
+data/
+checkpoints/
+outputs/
+
+# Experiment tracking
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Conda/venv
+.conda/
+.venv/

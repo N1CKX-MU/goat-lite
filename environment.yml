@@ -1,0 +1,10 @@
+name: goat
+channels:
+  - conda-forge
+  - aihabitat
+  - defaults
+dependencies:
+  - python=3.9
+  - habitat-sim=0.3.1=headless*
+  - pip:
+    - -r requirements.txt
