@@ -2,7 +2,7 @@
 
 > **What this document is.** A detailed, beginner-friendly reference for every concept, technique, and design decision in the GOAT-Lite codebase. If you or your teammate encounter a term you don't understand, look it up here. This document is updated as we build new modules.
 >
-> **Last updated:** Week 4 (occupancy map + frontier detection complete).
+> **Last updated:** Week 5 (instance memory database complete).
 
 ---
 
@@ -18,8 +18,9 @@
    - 3.5 [Perception Pipeline (`src/perception/pipeline.py`)](#35-perception-pipeline)
    - 3.6 [Occupancy Map (`src/mapping/occupancy.py`)](#36-occupancy-map)
    - 3.7 [Frontier Detection (`src/mapping/frontier.py`)](#37-frontier-detection)
-   - 3.8 [Seed Utility (`src/utils/seeds.py`)](#38-seed-utility)
-   - 3.9 [Smoke Test (`scripts/smoke_test.py`)](#39-smoke-test)
+   - 3.8 [Instance Memory Database (`src/memory/instance_db.py`)](#38-instance-memory-database)
+   - 3.9 [Seed Utility (`src/utils/seeds.py`)](#39-seed-utility)
+   - 3.10 [Smoke Test (`scripts/smoke_test.py`)](#310-smoke-test)
 4. [Testing Strategy](#4-testing-strategy)
 5. [Glossary of Key Terms](#5-glossary-of-key-terms)
 
@@ -635,7 +636,84 @@ The `centroid_ij` is the mean position of all cells in the frontier — this is 
 
 ---
 
-### 3.8 Seed Utility
+### 3.8 Instance Memory Database
+
+**File:** `src/memory/instance_db.py`
+**Built in:** Week 5
+
+#### What it does
+
+This is the agent's long-term memory. Every time the perception pipeline detects an object, that detection gets stored here — but intelligently. If the agent sees the same chair from two slightly different angles, those observations get **merged** into a single memory node rather than stored as two separate objects. This is what makes the agent "lifelong" — it builds up a coherent model of what's in the scene across hundreds of timesteps.
+
+#### InstanceNode — what the agent remembers about one object
+
+```python
+@dataclass
+class InstanceNode:
+    node_id: int              # unique ID (auto-incremented)
+    cls_id: int               # YOLO class ID (e.g. 56 for chair)
+    cls_name: str             # human-readable name
+    world_xyz: np.ndarray     # [3] — running mean position from all merged observations
+    clip_embed: np.ndarray    # [512] — running mean CLIP embedding, re-normalized
+    confidence: float         # running max confidence across all observations
+    first_seen_step: int      # when was this object first detected
+    last_seen_step: int       # when was it most recently seen
+    n_observations: int       # how many times has it been observed
+    best_thumbnail: np.ndarray  # 64x64 image from the highest-confidence view
+```
+
+**Why running mean for position?** Each detection gives a noisy estimate of where the object is (depth sensors are imperfect, the agent might be at an angle). Averaging over many observations converges on the true position. After 10 observations, the position is much more accurate than any single one.
+
+**Why running mean for embedding?** Similar logic — each view of the object produces a slightly different CLIP embedding (different angle, lighting, occlusion). Averaging produces a more robust representation. The re-normalization step after averaging ensures the embedding stays on the unit sphere (length 1), which is required for cosine similarity to work correctly.
+
+**Why running max for confidence?** The best view of an object (head-on, well-lit, unoccluded) produces the highest confidence. We want the thumbnail from that best view, and we use max confidence as a quality signal.
+
+#### The merging algorithm — the core logic
+
+When a new `PerceivedInstance` arrives, the `_integrate` method decides: merge it with an existing node, or create a new one?
+
+```
+New detection arrives (class=chair, position=(1.1, 0.5, 2.1))
+    │
+    ├── Find all existing nodes with same class (chair)
+    │   └── Filter to those within merge_dist_m (0.75m) in XZ distance
+    │       ├── No candidates → CREATE new node
+    │       └── Has candidates → pick the closest one
+    │           ├── Check embedding similarity with closest
+    │           │   ├── Similar (cosine > 0.85) → MERGE into existing node
+    │           │   └── Dissimilar (cosine ≤ 0.85) → CREATE new node
+```
+
+**Why check both distance AND embedding similarity?**
+
+Distance alone isn't enough. Imagine two different chairs 50cm apart (e.g., at a dining table). They're spatially close but visually different objects. The embedding similarity check prevents merging distinct objects that happen to be near each other.
+
+Conversely, embedding alone isn't enough. The same chair seen from the front and back might have somewhat different CLIP embeddings. The distance check ensures we only consider merging when detections are in roughly the same spot.
+
+**The thresholds:**
+- `merge_dist_m = 0.75` — objects within 75cm are candidates for merging. This is about the size of a chair. Sweepable in Week 10.
+- `merge_embed_sim = 0.85` — cosine similarity must exceed 0.85 for merge. This is fairly strict — the embeddings need to be quite similar. Sweepable in Week 10.
+
+#### Queries — how other modules use the database
+
+**`query_by_class(cls_id)`** — Returns all nodes of a given class. Used for category goals ("find a chair" → get all chair nodes).
+
+**`query_by_embedding(embed, top_k)`** — Returns the top-K nodes most similar to a given embedding, sorted by cosine similarity. Used for language goals ("find the red chair near the window" → encode text with CLIP → find most similar stored object).
+
+**`all_nodes()`** — Returns all nodes. Used for visualization and debugging.
+
+#### Memory budget
+
+Each node stores:
+- 512-dim float32 embedding = 2 KB
+- 64x64x3 uint8 thumbnail = 12 KB
+- Scalar fields = ~100 bytes
+
+Total per node: ~14 KB. For 100 nodes (a realistic scene): ~1.4 MB. Well under the 20 MB budget.
+
+---
+
+### 3.9 Seed Utility
 
 **File:** `src/utils/seeds.py`
 **Built in:** Week 1
@@ -658,7 +736,7 @@ The `try/except` around the torch import means this function works even in conte
 
 ---
 
-### 3.9 Smoke Test
+### 3.10 Smoke Test
 
 **File:** `scripts/smoke_test.py`
 **Built in:** Week 1
@@ -756,6 +834,24 @@ This is called **duck typing** — FakeDetector isn't a subclass of YOLODetector
 - min_size parameter filters small frontiers
 - Frontiers sorted by size descending
 - Frontier dataclass has correct fields (centroid_ij, size, cells)
+
+**Instance memory tests (16 tests in `tests/test_memory.py`):**
+- InstanceNode dataclass fields have correct shapes
+- Empty database returns no nodes
+- Single detection creates one node with correct fields
+- Node IDs auto-increment and are unique
+- query_by_class returns correct nodes, empty for unknown class
+- query_by_embedding returns sorted results, best match first
+- 3 close detections of same class merge into 1 node with n_observations=3
+- 2 chairs 2m apart → 2 separate nodes
+- Close detections with dissimilar embeddings → 2 nodes (embedding gate prevents merge)
+- Different classes at same location never merge
+- Merged node position is running mean of observations
+- Merged node embedding is re-normalized running mean
+- Thumbnail kept from highest-confidence observation
+- Confidence is running max across merged observations
+- Multiple detections in single update call handled correctly
+- 100-node database memory stays under 20 MB budget
 
 ---
 
@@ -866,6 +962,9 @@ Image processing techniques that operate on shapes/structures in binary images. 
 ### NMS (Non-Maximum Suppression)
 When a detector produces multiple overlapping boxes for the same object, NMS keeps only the highest-confidence one and removes the rest. The `iou=0.5` parameter means: if two boxes have IoU > 0.5, the weaker one is suppressed.
 
+### Merging (instance memory)
+The process of combining multiple observations of the same physical object into a single memory node. Our merging uses two gates: spatial proximity (within 0.75m) AND embedding similarity (cosine > 0.85). When merging, position and embedding are updated via running mean, confidence via running max, and the best thumbnail is kept. This deduplication is critical — without it, 100 detections of one chair would create 100 nodes instead of 1.
+
 ### Occupancy grid
 A 2D grid where each cell records whether that physical location is free (passable), occupied (blocked by an obstacle), or unknown (not yet observed). The fundamental data structure for 2D robot navigation — the planner uses it to find paths, and the explorer uses it to find frontiers.
 
@@ -882,6 +981,12 @@ A 4x4 matrix encoding an object's position and orientation in 3D space:
 [ 0 | 1 ]     t = 3x1 translation (position)
 ```
 SE(3) = "Special Euclidean group in 3 dimensions" — the mathematical group of all rotations and translations in 3D.
+
+### Running mean
+An incremental average that updates with each new observation without needing to store all past values. Formula: `new_mean = (old_mean * n + new_value) / (n + 1)`. We use this in the instance database to maintain average position and embedding as new detections arrive. Equivalent to the full average but computed incrementally.
+
+### Running max
+Keeping track of the maximum value seen so far. Updated as: `new_max = max(old_max, new_value)`. Used for confidence in the instance database — we want the highest confidence ever observed for an object, not the average.
 
 ### Ray clearing
 A technique for building occupancy maps. When a depth sensor sees an obstacle at distance D, we know that everything between the sensor and the obstacle (distance 0 to D) must be free space (otherwise the sensor couldn't see through it). We "clear" those intermediate cells by marking them as free. Implemented using Bresenham's line algorithm to efficiently find which grid cells the ray passes through.
