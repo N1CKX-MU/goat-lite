@@ -2,7 +2,7 @@
 
 > **What this document is.** A detailed, beginner-friendly reference for every concept, technique, and design decision in the GOAT-Lite codebase. If you or your teammate encounter a term you don't understand, look it up here. This document is updated as we build new modules.
 >
-> **Last updated:** Week 8 (GoatAgent state machine complete).
+> **Last updated:** Week 9 (eval runner, metrics, dataset loader complete).
 
 ---
 
@@ -27,6 +27,9 @@
    - 3.14 [Seed Utility (`src/utils/seeds.py`)](#314-seed-utility)
    - 3.15 [Smoke Test (`scripts/smoke_test.py`)](#315-smoke-test)
    - 3.16 [GoatAgent State Machine (`src/agent/goat_agent.py`)](#316-goatagent-state-machine)
+   - 3.17 [GOAT-Bench Dataset Loader (`src/sim/goat_dataset.py`)](#317-goat-bench-dataset-loader)
+   - 3.18 [Evaluation Metrics (`src/eval/metrics.py`)](#318-evaluation-metrics)
+   - 3.19 [Evaluation Runner (`src/eval/runner.py`)](#319-evaluation-runner)
 4. [Testing Strategy](#4-testing-strategy)
 5. [Glossary of Key Terms](#5-glossary-of-key-terms)
 
@@ -1053,6 +1056,109 @@ Tests use **fake subsystems** (FakePerception, FakeMemory, FakeMatcher, FakeMap)
 
 ---
 
+### 3.17 GOAT-Bench Dataset Loader
+
+**File:** `src/sim/goat_dataset.py`
+**Week:** 9
+**Purpose:** Parse GOAT-Bench episode files and provide structured data for evaluation.
+
+#### GOAT-Bench Data Format
+
+GOAT-Bench organizes data by scene. Each scene has a `.json.gz` content file containing:
+
+- **`episodes`**: list of episodes, each with:
+  - `episode_id`, `scene_id`, `start_position` (3D), `start_rotation` (quaternion)
+  - `tasks`: list of subtasks as tuples `[category, modality, goal_key, ...]`
+- **`goals`**: dict mapping `{scene_base}_{category}` to a list of goal instances, each with:
+  - `object_category`, `object_id`, `position` (3D ground truth)
+  - `lang_desc` (natural language description for language goals)
+  - `image_goals` (reference images for image goals)
+  - `view_points` (valid viewpoints where the goal is visible)
+
+#### Modality Mapping
+
+GOAT-Bench uses different names than our internal convention:
+- `"object"` → `"category"` (find any instance of this class)
+- `"description"` → `"language"` (find the specific instance described in natural language)
+- `"image"` → `"image"` (find the instance shown in a reference image)
+
+#### Key Functions
+
+- **`load_scene_episodes()`**: parse one scene's content file into `EpisodeSpec` objects
+- **`load_val_unseen()`**: load all 360 val_unseen episodes across 36 scenes
+- **`sample_dev_subset()`**: deterministically sample 30 episodes (218 subtasks) for fast iteration
+
+---
+
+### 3.18 Evaluation Metrics
+
+**File:** `src/eval/metrics.py`
+**Week:** 9
+**Purpose:** Compute standard navigation metrics: Success Rate (SR) and SPL.
+
+#### Success Rate (SR)
+
+A subtask is **successful** if BOTH conditions are met when the agent calls STOP:
+1. The agent is within `success_distance` (1.0 m) of the ground-truth goal instance position, measured on the XZ plane (ignoring height)
+2. The correct goal instance is visible in the agent's camera view
+
+This is stricter than just "being near any instance of that class" — GOAT-Bench measures against a **specific** ground-truth instance identified by `object_id`.
+
+#### SPL (Success weighted by Path Length)
+
+```
+SPL = success * shortest_path / max(shortest_path, actual_path)
+```
+
+SPL rewards efficiency: a successful agent that took the shortest possible path gets SPL = 1.0, while one that wandered gets a lower score proportional to how much extra distance it traveled. Failed subtasks always get SPL = 0.0.
+
+The `shortest_path` is the **geodesic distance** — the shortest walkable path through the navmesh, computed by Habitat's pathfinder. This accounts for walls and obstacles.
+
+#### Aggregation
+
+Results are broken down by:
+- **Modality**: SR/SPL for category, language, and image goals separately
+- **Subtask index**: SR/SPL for the 1st, 2nd, 3rd, etc. subtask in each episode — this is the "lifelong curve" that shows whether memory helps on later subtasks
+
+---
+
+### 3.19 Evaluation Runner
+
+**File:** `src/eval/runner.py`
+**Week:** 9
+**Purpose:** Run the agent on GOAT-Bench episodes, collecting per-subtask results.
+
+#### Episode Execution
+
+For each episode:
+1. Set the agent to the episode's start position and rotation
+2. For each subtask in order:
+   - Create a `GoalSpec` from the subtask's modality and category
+   - Reset the agent with `keep_memory=True` (except for the first subtask)
+   - Compute the geodesic shortest path from current position to the goal
+   - Run the agent's `act()` loop until it returns STOP or hits the step limit
+   - Track the actual path length by accumulating GPS displacements
+   - Evaluate success using `subtask_success()`
+   - Compute SPL
+
+#### Failure Classification
+
+Each failed subtask is categorized:
+- **`timeout`**: agent hit the 500-step limit without calling STOP
+- **`wrong_stop`**: agent stopped close to the goal but didn't see it (wrong orientation)
+- **`no_plan`**: agent stopped far from the goal (couldn't find or reach it)
+
+This taxonomy helps diagnose the top failure buckets during debugging.
+
+#### Report Generation
+
+`src/eval/report.py` saves three artifacts:
+- **`results.csv`**: one row per subtask with all metrics
+- **`summary.json`**: aggregated SR, SPL, per-modality and per-subtask-index breakdowns
+- **`failures.jsonl`**: one JSON line per failure for easy analysis
+
+---
+
 ## 4. Testing Strategy
 
 ### Philosophy
@@ -1256,6 +1362,9 @@ A numerical algorithm that simulates wavefront propagation — like dropping a s
 ### FOV (Field of View)
 How wide the camera's "cone of vision" is, in degrees. Our camera uses 90° horizontal FOV — it can see 45° to the left and 45° to the right of center. A wider FOV sees more but with more distortion.
 
+### Geodesic Distance
+The shortest walkable path between two points, respecting walls and obstacles. Unlike Euclidean (straight-line) distance, geodesic distance follows the navigable mesh (navmesh). If two points are 3m apart in a straight line but separated by a wall, the geodesic distance might be 15m because you have to walk around. Used in SPL computation.
+
 ### Gradient
 In neural networks, gradients tell you how to adjust model weights to reduce error. During inference (using a trained model), we don't need gradients, so we use `torch.no_grad()` to skip computing them — this saves ~50% of memory.
 
@@ -1292,6 +1401,9 @@ The standard metric for object detection accuracy. mAP@0.5 means "average precis
 
 ### Morphological operations
 Image processing techniques that operate on shapes/structures in binary images. Common ones: **dilation** (grow regions), **erosion** (shrink regions), **opening** (erosion then dilation — removes small noise), **closing** (dilation then erosion — fills small gaps). We use dilation in frontier detection.
+
+### Navmesh (Navigation Mesh)
+A precomputed mesh of walkable surfaces in a 3D environment. Habitat uses the navmesh to determine which positions are navigable and to compute geodesic distances. The navmesh is stored alongside each HM3D scene as a `.navmesh` file and accounts for walls, furniture, stairs, etc.
 
 ### NMS (Non-Maximum Suppression)
 When a detector produces multiple overlapping boxes for the same object, NMS keeps only the highest-confidence one and removes the rest. The `iou=0.5` parameter means: if two boxes have IoU > 0.5, the weaker one is suppressed.
@@ -1336,6 +1448,12 @@ Image dimensions in pixels, e.g., 256x256. More pixels = more detail but more co
 
 ### Resolution (map)
 Meters per grid cell. Our default is 0.05 m (5 cm). A 24m x 24m room at 5cm resolution = a 480x480 grid.
+
+### SPL (Success weighted by Path Length)
+The standard efficiency metric for navigation: `SPL = success * shortest_path / max(shortest_path, actual_path)`. A perfect agent that always takes the shortest path scores SPL = 1.0. An agent that succeeds but wanders gets a lower SPL proportional to how much extra it traveled. Failed subtasks contribute SPL = 0.0. SPL is the primary metric in the GOAT-Bench leaderboard — it rewards both finding the goal AND finding it efficiently.
+
+### Success Rate (SR)
+The fraction of subtasks where the agent successfully navigated to the correct goal instance. In GOAT-Bench, success requires being within 1.0m of the goal AND having it visible in the camera when STOP is called. SR measures capability (can the agent find things?) while SPL measures efficiency (does it find them quickly?).
 
 ### Tokenization
 Converting text into numbers that a neural network can process. The word "chair" might become token ID `7245`. CLIP uses its own tokenizer trained alongside the model.

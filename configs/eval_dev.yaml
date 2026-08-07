@@ -1,0 +1,7 @@
+# Dev evaluation configuration
+eval:
+  n_episodes: 30
+  seed: 42
+  dataset_root: "data/datasets/goat_bench/hm3d/v1/val_unseen"
+  hm3d_root: "data/hm3d"
+  device: "cuda"

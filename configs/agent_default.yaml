@@ -1,0 +1,38 @@
+# Default agent configuration
+agent:
+  max_steps: 500
+  success_distance: 1.0
+
+perception:
+  detector:
+    weights: "yolov8n.pt"
+    conf: 0.35
+    iou: 0.5
+    imgsz: 256
+    fp16: true
+  encoder:
+    model_name: "ViT-B-32"
+    pretrained: "laion2b_s34b_b79k"
+    fp16: true
+  min_crop_size: 32
+  thumbnail_size: 64
+
+memory:
+  merge_dist_m: 0.75
+  merge_embed_sim: 0.85
+
+matching:
+  category_threshold: 0.0
+  language_threshold: 0.24
+  use_template: true
+
+mapping:
+  size_m: 24.0
+  resolution_m: 0.05
+  num_classes: 37
+  min_height: 0.1
+  max_height: 1.5
+
+planner:
+  inflate_cells: 4
+  obstacle_penalty: 3.0
