@@ -2,7 +2,7 @@
 
 > **What this document is.** A detailed, beginner-friendly reference for every concept, technique, and design decision in the GOAT-Lite codebase. If you or your teammate encounter a term you don't understand, look it up here. This document is updated as we build new modules.
 >
-> **Last updated:** Week 5 (instance memory database complete).
+> **Last updated:** Week 6 (goal matching + midterm demo complete).
 
 ---
 
@@ -19,8 +19,9 @@
    - 3.6 [Occupancy Map (`src/mapping/occupancy.py`)](#36-occupancy-map)
    - 3.7 [Frontier Detection (`src/mapping/frontier.py`)](#37-frontier-detection)
    - 3.8 [Instance Memory Database (`src/memory/instance_db.py`)](#38-instance-memory-database)
-   - 3.9 [Seed Utility (`src/utils/seeds.py`)](#39-seed-utility)
-   - 3.10 [Smoke Test (`scripts/smoke_test.py`)](#310-smoke-test)
+   - 3.9 [Goal Matcher (`src/matching/goal_matcher.py`)](#39-goal-matcher)
+   - 3.10 [Seed Utility (`src/utils/seeds.py`)](#310-seed-utility)
+   - 3.11 [Smoke Test (`scripts/smoke_test.py`)](#311-smoke-test)
 4. [Testing Strategy](#4-testing-strategy)
 5. [Glossary of Key Terms](#5-glossary-of-key-terms)
 
@@ -713,7 +714,66 @@ Total per node: ~14 KB. For 100 nodes (a realistic scene): ~1.4 MB. Well under t
 
 ---
 
-### 3.9 Seed Utility
+### 3.9 Goal Matcher
+
+**File:** `src/matching/goal_matcher.py`
+**Built in:** Week 6
+
+#### What it does
+
+Given a goal ("find a chair" or "find the red chair near the window") and the instance memory database, the GoalMatcher finds the best matching object node — or returns None if nothing matches well enough.
+
+This is the bridge between "what the agent is looking for" and "what the agent has seen." It's what closes the loop between perception/memory and planning.
+
+#### Two matching modes
+
+**Category matching** (`modality="category"`, e.g. `value="chair"`):
+1. Query the database for all nodes with `cls_name == goal.value`
+2. If none found, return `(None, 0.0)`
+3. If found, return the node with the highest confidence and its confidence as the score
+
+This is straightforward string matching. No threshold needed — if we've seen a chair and the goal is "chair", it matches. The threshold is effectively 0.0.
+
+**Language matching** (`modality="language"`, e.g. `value="the wooden chair near the window"`):
+1. Encode the goal text with CLIP's text encoder to get a 512-dim embedding
+2. Compute cosine similarity between this text embedding and every stored node's image embedding
+3. If the best score exceeds `language_threshold` (default 0.24), return that node
+4. If below threshold, return `(None, score)` — we found something but aren't confident enough
+
+This is where CLIP's cross-modal magic happens: comparing a text embedding against image embeddings in the same vector space.
+
+#### Template wrapping
+
+Short goal values like "chair" don't work well as raw CLIP text inputs. CLIP was trained on full sentences like "a photo of a chair", so single words produce weaker embeddings.
+
+When `use_template=True` (default), short values (≤ 3 words) get wrapped:
+- `"chair"` → `"a photo of chair"`
+- `"red couch"` → `"a photo of red couch"`
+
+Long descriptions are already sentence-like, so they pass through unchanged:
+- `"the chair with red cushion near the window"` → used as-is
+
+The 3-word cutoff is a simple heuristic. If the input has 4+ words, it's probably already a natural description.
+
+#### Threshold calibration
+
+The `language_threshold=0.24` is a starting guess. CLIP cosine similarities for text-image pairs tend to range from ~0.15 (weak match) to ~0.35 (strong match). The threshold will be re-tuned in Week 10 by plotting precision-recall curves on dev scenes.
+
+#### Midterm demo script
+
+**File:** `scripts/midterm_demo.py`
+
+The first end-to-end pipeline test (requires Habitat + a scene). It:
+1. Loads a scene and initializes all modules (detector, encoder, pipeline, map, memory, matcher)
+2. Random-walks the agent for 300 steps, running perception + memory each step
+3. Updates the occupancy map every 2 steps
+4. Prints a summary of all stored instance nodes
+5. Tests 5 hand-crafted goals (3 category, 2 language) against the matcher
+6. Saves a top-down plot showing the occupancy map, agent trajectory, all instance nodes, and matched goals highlighted in red
+
+---
+
+### 3.10 Seed Utility
 
 **File:** `src/utils/seeds.py`
 **Built in:** Week 1
@@ -736,7 +796,7 @@ The `try/except` around the torch import means this function works even in conte
 
 ---
 
-### 3.10 Smoke Test
+### 3.11 Smoke Test
 
 **File:** `scripts/smoke_test.py`
 **Built in:** Week 1
@@ -834,6 +894,17 @@ This is called **duck typing** — FakeDetector isn't a subclass of YOLODetector
 - min_size parameter filters small frontiers
 - Frontiers sorted by size descending
 - Frontier dataclass has correct fields (centroid_ij, size, cells)
+
+**Goal matcher tests (10 tests in `tests/test_matcher.py`):**
+- Category matching finds existing class and returns highest-confidence node
+- Category matching returns None for non-existent class
+- Category matching returns None on empty database
+- Category score equals node confidence
+- Language matching returns best embedding match
+- Language matching returns None when below threshold
+- Language matching returns None on empty database
+- Template wrapping: short values get "a photo of" prefix
+- Template wrapping: long sentences used directly without wrapping
 
 **Instance memory tests (16 tests in `tests/test_memory.py`):**
 - InstanceNode dataclass fields have correct shapes

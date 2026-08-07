@@ -40,6 +40,9 @@ class InstanceDatabase:
     def query_by_class(self, cls_id: int) -> list[InstanceNode]:
         return [n for n in self._nodes if n.cls_id == cls_id]
 
+    def query_by_class_name(self, cls_name: str) -> list[InstanceNode]:
+        return [n for n in self._nodes if n.cls_name == cls_name]
+
     def query_by_embedding(
         self, embed: np.ndarray, top_k: int = 5
     ) -> list[tuple[InstanceNode, float]]:
