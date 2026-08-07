@@ -2,7 +2,7 @@
 
 > **What this document is.** A detailed, beginner-friendly reference for every concept, technique, and design decision in the GOAT-Lite codebase. If you or your teammate encounter a term you don't understand, look it up here. This document is updated as we build new modules.
 >
-> **Last updated:** Week 7 (planner + frontier exploration + action selection complete).
+> **Last updated:** Week 8 (GoatAgent state machine complete).
 
 ---
 
@@ -26,6 +26,7 @@
    - 3.13 [Action Selection (`src/agent/action.py`)](#313-action-selection)
    - 3.14 [Seed Utility (`src/utils/seeds.py`)](#314-seed-utility)
    - 3.15 [Smoke Test (`scripts/smoke_test.py`)](#315-smoke-test)
+   - 3.16 [GoatAgent State Machine (`src/agent/goat_agent.py`)](#316-goatagent-state-machine)
 4. [Testing Strategy](#4-testing-strategy)
 5. [Glossary of Key Terms](#5-glossary-of-key-terms)
 
@@ -967,6 +968,91 @@ A quick sanity check that everything is installed correctly and fits within VRAM
 
 ---
 
+### 3.16 GoatAgent State Machine
+
+**File:** `src/agent/goat_agent.py`
+**Week:** 8
+**Purpose:** The top-level controller that wires every subsystem together into a single sense-plan-act loop. This is the "brain" of the agent — it decides what to do each step based on its current state and what it perceives.
+
+#### The State Machine
+
+GoatAgent uses a **finite state machine (FSM)** with four states, represented by the `AgentState` enum:
+
+| State | Meaning | Entry condition |
+|-------|---------|----------------|
+| `SEARCHING` | No matching object found yet. Explore the environment via frontiers. | Initial state after `reset()`. |
+| `APPROACHING` | A candidate object was found in memory. Navigate toward it. | Goal matcher returns a match with score > 0. |
+| `VERIFYING` | Agent is close enough to the candidate. Confirm it's really the goal. | Agent within `success_distance` (default 1.0 m) of the matched node. |
+| `DONE` | Episode over — either success or timeout. | Visual confirmation in VERIFYING, or timeout, or no plan possible. |
+
+**Why a state machine?** The agent needs different behaviors at different stages of a task. When searching, it should explore new areas. When approaching, it should follow a path. When verifying, it should look carefully. A state machine makes these modes explicit and testable — each state has clear entry/exit conditions and a clear action policy.
+
+#### The `act()` Loop
+
+Each call to `act(obs)` runs one full sense-plan-act cycle:
+
+1. **Timeout check** — if we've exceeded `max_steps` (default 500), transition to DONE and return stop (action 0). This prevents the agent from running forever on a single subtask.
+
+2. **Perception** — run the perception pipeline on the current observation to detect objects. Update the occupancy map with the new depth frame and any detected objects. Update the instance memory with new detections.
+
+3. **Goal matching** — ask the GoalMatcher to search memory for an object that matches the current goal. This returns either a matching InstanceNode with a confidence score, or None.
+
+4. **State transitions** — apply the FSM transition rules:
+   - SEARCHING → APPROACHING: matcher found a candidate.
+   - APPROACHING → VERIFYING: agent is within `success_distance` of the matched node's world position.
+   - VERIFYING → DONE: the goal class is detected in the current camera frame (success!).
+   - VERIFYING → APPROACHING (revert): 5 verification steps passed without visual confirmation — the match may have been wrong, so go back to approaching.
+
+5. **Action selection** — depends on the current state:
+   - **SEARCHING:** find frontiers on the occupancy map, pick the best one using `choose_frontier()`, plan an A* path to it, and follow that path using `path_to_action()`.
+   - **APPROACHING:** plan an A* path to the matched node's world position, and follow it.
+   - **VERIFYING:** move forward slowly (action 1) to get a better view of the candidate object.
+   - **DONE:** always return stop (action 0).
+
+#### Path Following
+
+The agent maintains a `_current_path` (list of grid cells from A*) and a `_path_idx` (how far along the path it is). When following a path:
+
+- A **lookahead** of 3 cells is used — instead of navigating to the immediate next cell, the agent aims at a waypoint a few cells ahead. This produces smoother movement and avoids excessive turning at every single grid cell.
+- `path_to_action()` converts the angular difference between the agent's heading and the direction to the waypoint into an action (forward if aligned, turn left/right if not).
+- The path index advances when the agent moves forward.
+- If the path is exhausted or becomes invalid, the agent replans.
+
+#### Failure Handling
+
+- **No plan possible:** if A* returns None (path blocked) for 2 consecutive steps, the agent gives up and transitions to DONE. This prevents infinite spinning when the agent is trapped.
+- **Stale verification:** if the agent reaches a candidate but can't see it after 5 steps of looking, it reverts to APPROACHING to try again. This handles cases where the memory position was slightly wrong.
+
+#### The `reset()` Method
+
+Called at the start of each subtask. With `keep_memory=False` (default), everything resets. With `keep_memory=True`, the instance memory and map persist across subtasks — this is the **lifelong** aspect of the system. The agent remembers objects it saw while pursuing previous goals, so if it's later asked to find one of those objects, it can navigate directly to it without re-exploring.
+
+#### Constructor Parameters
+
+| Parameter | Type | Default | Purpose |
+|-----------|------|---------|---------|
+| `perception` | PerceptionPipeline | — | Runs YOLO + CLIP on each frame |
+| `memory` | InstanceDatabase | — | Stores and merges detected objects |
+| `matcher` | GoalMatcher | — | Matches goals to memory entries |
+| `semantic_map` | SemanticMap | — | 2D occupancy grid for planning |
+| `intrinsics` | np.ndarray (3x3) | — | Camera intrinsic matrix for depth projection |
+| `max_steps` | int | 500 | Hard timeout per subtask |
+| `success_distance` | float | 1.0 | Distance threshold (meters) for APPROACHING → VERIFYING |
+
+#### Testing Strategy
+
+Tests use **fake subsystems** (FakePerception, FakeMemory, FakeMatcher, FakeMap) that return configurable results. This lets us test the state machine logic in isolation without needing GPU, Habitat, or real models. Key tests verify:
+- Initial state is SEARCHING after reset
+- SEARCHING → APPROACHING when matcher finds a match
+- APPROACHING → VERIFYING when agent is close
+- Timeout triggers DONE and returns stop action
+- Perception pipeline runs every step and feeds memory
+- `keep_memory=True` preserves memory across resets
+- Actions are always valid (0–3)
+- Agent runs many steps without crashing
+
+---
+
 ## 4. Testing Strategy
 
 ### Philosophy
@@ -1151,6 +1237,9 @@ A fixed-length vector (array of numbers) that represents something (an image, a 
 ### Epoch
 One complete pass through the entire training dataset during model training. "30 epochs" means the model sees every training example 30 times.
 
+### Finite State Machine (FSM)
+A computational model with a fixed number of states. The system is always in exactly one state, and transitions between states are triggered by specific conditions. In GoatAgent, the four states are SEARCHING, APPROACHING, VERIFYING, and DONE. FSMs are popular in robotics and game AI because they make behavior explicit, testable, and easy to debug — you can always ask "what state is the agent in?" and "why did it transition?"
+
 ### fp16 / fp32 (half-precision / single-precision)
 How many bits are used to represent a floating-point number:
 - **fp32** (float32): 32 bits — standard precision, ~7 decimal digits
@@ -1191,6 +1280,12 @@ Dividing a vector by its length (L2 norm) so the result has length 1. After norm
 ```python
 normalized = vector / np.linalg.norm(vector)
 ```
+
+### Lifelong (navigation)
+The ability to retain knowledge across multiple tasks within the same environment. In GOAT-Lite, when the agent finishes searching for one object and is given a new goal, it keeps its instance memory and occupancy map via `reset(obs, keep_memory=True)`. If it saw a chair while looking for a table, it can navigate directly to that chair later without re-exploring. This is a key advantage over episodic agents that start from scratch each time.
+
+### Lookahead (path following)
+Instead of steering toward the immediately next cell on a path, the agent looks a few cells ahead (default 3) and steers toward that waypoint. This produces smoother trajectories — without lookahead, the agent would make tiny corrections at every grid cell, resulting in jerky zig-zag movement. The tradeoff is that the agent may cut corners slightly, but in practice this is negligible.
 
 ### mAP (mean Average Precision)
 The standard metric for object detection accuracy. mAP@0.5 means "average precision at IoU threshold 0.5." Higher is better. Our target for the finetuned YOLO is mAP@0.5 >= 0.55.
