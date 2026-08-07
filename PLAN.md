@@ -855,6 +855,8 @@ Choose one stretch feature if the schedule allows. In priority order:
 
 **Stretch C: Open-vocab detection swap.** Replace YOLOv8n with YOLO-World-S. Re-run key benchmarks and add an ablation row. Only if VRAM budget was underutilized in earlier smoke tests. ~2 days.
 
+**Stretch D: Interactive live demo.** Build `scripts/interactive_demo.py` — a live mode where the user types a natural language goal into the terminal and watches the agent navigate in real-time via a matplotlib/cv2 window showing first-person RGB + top-down map updating each step. Much more impressive for presentations than pre-rendered video. ~1 day. (Added 2026-08-07.)
+
 Do not attempt more than one. Report polish and dry-runs matter more than another feature.
 
 Finish full report. Circulate to guide for feedback.
