@@ -2,7 +2,7 @@
 
 > **What this document is.** A detailed, beginner-friendly reference for every concept, technique, and design decision in the GOAT-Lite codebase. If you or your teammate encounter a term you don't understand, look it up here. This document is updated as we build new modules.
 >
-> **Last updated:** Week 3 (transforms + perception pipeline complete).
+> **Last updated:** Week 4 (occupancy map + frontier detection complete).
 
 ---
 
@@ -16,8 +16,10 @@
    - 3.3 [CLIP Encoder (`src/perception/encoder.py`)](#33-clip-encoder)
    - 3.4 [Coordinate Transforms (`src/mapping/transforms.py`)](#34-coordinate-transforms)
    - 3.5 [Perception Pipeline (`src/perception/pipeline.py`)](#35-perception-pipeline)
-   - 3.6 [Seed Utility (`src/utils/seeds.py`)](#36-seed-utility)
-   - 3.7 [Smoke Test (`scripts/smoke_test.py`)](#37-smoke-test)
+   - 3.6 [Occupancy Map (`src/mapping/occupancy.py`)](#36-occupancy-map)
+   - 3.7 [Frontier Detection (`src/mapping/frontier.py`)](#37-frontier-detection)
+   - 3.8 [Seed Utility (`src/utils/seeds.py`)](#38-seed-utility)
+   - 3.9 [Smoke Test (`scripts/smoke_test.py`)](#39-smoke-test)
 4. [Testing Strategy](#4-testing-strategy)
 5. [Glossary of Key Terms](#5-glossary-of-key-terms)
 
@@ -468,7 +470,172 @@ At 200ms per timestep budget, this ~17ms saving matters.
 
 ---
 
-### 3.6 Seed Utility
+### 3.6 Occupancy Map
+
+**File:** `src/mapping/occupancy.py`
+**Built in:** Week 4
+
+#### What it does
+
+Builds a 2D top-down map of the environment from depth images. This is the agent's "mental picture" of the house floor plan — it knows which areas are open space, which have walls/furniture, and which it hasn't seen yet. The map also tracks which object categories have been detected where.
+
+#### The three grids
+
+The `SemanticMap` maintains three parallel grids, all the same size:
+
+**1. Occupancy grid** — `[H, W]` of int8 values:
+- `-1` = **unknown** (haven't observed this area yet)
+- `0` = **free** (confirmed open space the agent could walk through)
+- `1` = **occupied** (wall, furniture, or other obstacle)
+
+This is the grid the planner uses for pathfinding — it plans paths through free cells and avoids occupied ones.
+
+**2. Explored mask** — `[H, W]` of bool:
+- `True` = this cell has been observed at least once
+- `False` = never seen
+
+Used by frontier detection to find the boundary of what's been explored.
+
+**3. Class counts** — `[H, W, num_classes]` of int16:
+- For each cell, counts how many times each object class has been detected there
+- Example: `class_counts[100, 200, 5] = 12` means "class 5 (chair) has been detected 12 times at grid cell (100, 200)"
+- Used later for semantic queries ("where are the chairs?")
+
+#### Grid sizing and origin
+
+```python
+SemanticMap(size_m=24.0, resolution_m=0.05)
+```
+
+- **`size_m=24.0`** — the map covers 24m x 24m of physical space. Most HM3D indoor scenes fit within this.
+- **`resolution_m=0.05`** — each grid cell represents 5cm x 5cm. This gives us `24.0 / 0.05 = 480` cells per side, so a 480x480 grid.
+- **Origin** is at `(-size/2, -size/2)` in world XZ coordinates. This centers the map at the world origin `(0, 0)`, so the agent starts roughly in the middle of the grid.
+
+#### update_from_depth — how it works
+
+This is the core function that builds the map. Called once per relevant timestep with the current depth image and the agent's pose.
+
+**Step 1: Back-project depth to world points**
+
+Uses the transform functions from Week 3:
+1. `depth_to_pointcloud_camera()` — converts every pixel of the depth image into a 3D point in camera frame
+2. `pointcloud_camera_to_world()` — transforms those points to world coordinates using the agent's current pose
+
+**Step 2: Downsample**
+
+The depth image has 256x256 = 65,536 pixels. Processing all of them is wasteful since many map to the same grid cell. We take every 4th point (`pc_world[::4]`), reducing to ~16,384 points. This barely affects map quality but is 4x faster.
+
+**Step 3: Height filter**
+
+Not every 3D point should become an obstacle on our 2D map:
+- Points on the **floor** (Y < 0.1m) — the agent walks on the floor, it's not an obstacle
+- Points on the **ceiling** (Y > 1.5m) — the agent can walk under the ceiling
+
+We only keep points between 0.1m and 1.5m height above the floor. These are the walls, furniture, and obstacles that actually block the agent.
+
+**Step 4: Vectorized grid projection**
+
+Instead of converting points one-by-one (slow Python loop), we convert all points to grid coordinates with NumPy vector operations:
+```python
+cols = np.round(offsets[:, 0] / self._resolution).astype(np.int32)
+rows = np.round(offsets[:, 1] / self._resolution).astype(np.int32)
+```
+
+This processes thousands of points in microseconds instead of milliseconds.
+
+**Step 5: Mark occupied cells**
+
+All valid points are marked as occupied in bulk:
+```python
+self._occupancy[rows_valid, cols_valid] = 1
+```
+
+NumPy advanced indexing lets us set thousands of cells in one operation.
+
+**Step 6: Ray clearing (Bresenham)**
+
+This is the clever part. For each occupied cell, we trace a ray from the camera position to that cell and mark all cells along the ray as **free**. The logic: if we can see a wall at position X, then everything between us and X must be empty space (otherwise we couldn't see through it).
+
+We use **Bresenham's line algorithm** (via `skimage.draw.line`) to find which grid cells the ray passes through. Bresenham is a classic algorithm from computer graphics that determines which pixels/cells a line between two points passes through — it's integer-only and very fast.
+
+**Optimization:** Many points project to the same grid cell. Instead of tracing a ray for every point, we use `np.unique` to find only the unique occupied cells, then trace one ray per unique cell. This reduced the function from ~440ms to ~8ms.
+
+#### update_from_detections — how it works
+
+When the perception pipeline detects objects, we record where each object class was seen on the map.
+
+For each `PerceivedInstance`:
+1. Convert its `world_xyz` to a grid cell `(row, col)`
+2. Apply a 3x3 **Gaussian-like kernel** centered at that cell:
+```
+[1  2  1]
+[2  4  2]
+[1  2  1]
+```
+3. Add these weights to `class_counts[:, :, cls_id]`
+
+**Why a kernel instead of a single cell?** The world position is noisy (depth estimation isn't perfect). Spreading the count over a 3x3 neighborhood (15cm x 15cm at 5cm resolution) accounts for this uncertainty. The center gets the highest weight (4) because it's the most likely position.
+
+#### Performance
+
+- `update_from_depth`: ~8ms median (target was < 100ms)
+- Key optimization: vectorized grid projection + ray clearing only on unique cells
+- Memory: 480x480 grid at int8 = ~230 KB for occupancy, ~230 KB for explored, ~17 MB for class counts (480x480x37 at int16)
+
+---
+
+### 3.7 Frontier Detection
+
+**File:** `src/mapping/frontier.py`
+**Built in:** Week 4
+
+#### What it does
+
+Finds **frontiers** — the boundaries between explored free space and unexplored unknown space. These are the most promising places to go to discover new areas. When the agent doesn't know where its goal is, it navigates to the nearest/largest frontier to explore.
+
+#### What is a frontier?
+
+Imagine you've explored a room and can see a doorway. Through the doorway is a hallway you haven't explored yet. The cells at the doorway threshold — free cells touching unknown cells — are the frontier. Going there would reveal new space.
+
+Formally: a frontier cell is a **free** cell that has at least one **unknown** neighbor (in the 8-connected sense — up, down, left, right, and diagonals).
+
+#### The algorithm
+
+**Step 1: Find frontier cells**
+
+```python
+free_mask = occupancy == 0           # all free cells
+unknown_mask = occupancy == -1       # all unknown cells
+unknown_neighbor = binary_dilation(unknown_mask, kernel=3x3)  # expand unknown by 1 pixel
+frontier_mask = free_mask & unknown_neighbor  # free cells that touch unknown
+```
+
+**Binary dilation** is a morphological operation: it takes a boolean mask and "grows" it by one pixel in all directions. If we dilate the unknown mask, any free cell that was adjacent to an unknown cell will now overlap with the dilated unknown mask. The intersection (`&`) gives us exactly the frontier cells.
+
+**Step 2: Group into connected components**
+
+`scipy.ndimage.label` finds connected components — groups of frontier cells that touch each other. Each group becomes one `Frontier` object. This is the same algorithm used in image processing to find distinct blobs.
+
+**Step 3: Filter and sort**
+
+- Frontiers with fewer cells than `min_size` (default 20) are dropped — they're too small to be worth navigating to (probably just a tiny crack between furniture).
+- Remaining frontiers are sorted by size descending — the biggest frontier is the most promising place to explore.
+
+#### Frontier dataclass
+
+```python
+@dataclass
+class Frontier:
+    centroid_ij: tuple[int, int]  # center of the frontier (for navigation targeting)
+    size: int                     # number of frontier cells (bigger = more to explore)
+    cells: np.ndarray             # [N, 2] all the (row, col) coordinates
+```
+
+The `centroid_ij` is the mean position of all cells in the frontier — this is where the planner will aim when navigating to this frontier.
+
+---
+
+### 3.8 Seed Utility
 
 **File:** `src/utils/seeds.py`
 **Built in:** Week 1
@@ -491,7 +658,7 @@ The `try/except` around the torch import means this function works even in conte
 
 ---
 
-### 3.7 Smoke Test
+### 3.9 Smoke Test
 
 **File:** `scripts/smoke_test.py`
 **Built in:** Week 1
@@ -565,6 +732,31 @@ This is called **duck typing** — FakeDetector isn't a subclass of YOLODetector
 - Step number propagates correctly
 - All embeddings are L2-normalized (norm ≈ 1.0)
 
+**Occupancy map tests (14 tests in `tests/test_occupancy.py`):**
+- Grid dimensions match size_m / resolution_m
+- Initial occupancy is all unknown (-1)
+- Initial explored is all False
+- World (0,0) maps to center of grid
+- World↔grid roundtrip within resolution tolerance
+- Depth update marks cells as occupied
+- Depth update marks cells along rays as free (Bresenham clearing)
+- Depth update marks cells as explored
+- Height filter prevents floor/ceiling from becoming obstacles
+- Multiple depth updates from different poses accumulate explored area
+- Out-of-bounds points don't crash
+- Detection update increments class counts at correct class index
+- Gaussian kernel spreads counts to neighboring cells
+- Multiple detections of different classes both register
+
+**Frontier tests (7 tests in `tests/test_frontier.py`):**
+- Fully unknown map → no frontiers
+- Fully explored map → no frontiers
+- Partial hallway → frontier at the open end
+- Room with doorway → frontier at the door opening
+- min_size parameter filters small frontiers
+- Frontiers sorted by size descending
+- Frontier dataclass has correct fields (centroid_ij, size, cells)
+
 ---
 
 ## 5. Glossary of Key Terms
@@ -579,8 +771,14 @@ y = (v - cy) * d / fy
 z = d
 ```
 
+### Binary dilation
+A morphological image operation that "grows" a boolean mask by one pixel in all directions. If any neighbor of a False pixel is True, that pixel becomes True in the output. We use it in frontier detection: dilating the unknown mask lets us find free cells that are adjacent to unknown cells.
+
 ### Bounding box (bbox)
 A rectangle around a detected object in an image. Format `(x1, y1, x2, y2)`: top-left corner to bottom-right corner, in pixel coordinates.
+
+### Bresenham's line algorithm
+A classic computer graphics algorithm that determines which grid cells a straight line between two points passes through. Uses only integer arithmetic, making it very fast. We use it for ray clearing in the occupancy map — tracing a line from the camera to each detected obstacle and marking intermediate cells as free.
 
 ### Camera intrinsics matrix (K)
 A 3x3 matrix that encodes a camera's internal properties:
@@ -597,6 +795,9 @@ It does NOT include the camera's position or orientation in the world — that's
 ### CLIP (Contrastive Language-Image Pre-training)
 A neural network from OpenAI that maps both images and text into the same 512-dimensional vector space. Semantically related images and text end up with similar vectors. We use it to match text goals ("find the chair") to stored image crops of objects.
 
+### Connected components
+Groups of adjacent pixels/cells that share a property. `scipy.ndimage.label` finds connected components in a boolean mask — it assigns a unique integer label to each group of touching True cells. We use it to group frontier cells into distinct frontiers.
+
 ### Confidence score
 A number from 0 to 1 indicating how sure the detector is about a detection. Higher = more confident. We filter at `conf=0.35` by default, meaning detections below 35% confidence are discarded.
 
@@ -612,6 +813,9 @@ A 2D array where each pixel value is the distance (in meters) from the camera to
 ### Duck typing
 A Python concept: "if it walks like a duck and quacks like a duck, it's a duck." In our tests, `FakeDetector` has a `.detect()` method that matches `YOLODetector.detect()`, so Python accepts it wherever a YOLODetector is expected — no inheritance needed.
 
+### Downsample
+Reducing the number of data points by keeping every Nth one. In `update_from_depth`, we take every 4th point from the point cloud (`pc[::4]`), reducing computation 4x while barely affecting map quality since neighboring pixels map to the same or adjacent grid cells anyway.
+
 ### Embedding
 A fixed-length vector (array of numbers) that represents something (an image, a word, a sentence) in a way that captures its meaning. Semantically similar things have similar embeddings (close together in vector space).
 
@@ -624,6 +828,9 @@ How many bits are used to represent a floating-point number:
 - **fp16** (float16): 16 bits — half precision, ~3 decimal digits
 
 fp16 uses half the memory and is faster on modern GPUs, but can cause numerical instability in some operations (like softmax on large tensors). We use fp16 for inference to fit within 4 GB VRAM, with occasional casts back to fp32 for sensitive operations.
+
+### Frontier
+In exploration robotics, a frontier is the boundary between known free space and unknown space. It's the most informative place to go — moving to a frontier will reveal new areas. Our agent navigates to the largest nearby frontier when it doesn't know where its goal is.
 
 ### FOV (Field of View)
 How wide the camera's "cone of vision" is, in degrees. Our camera uses 90° horizontal FOV — it can see 45° to the left and 45° to the right of center. A wider FOV sees more but with more distortion.
@@ -653,8 +860,14 @@ normalized = vector / np.linalg.norm(vector)
 ### mAP (mean Average Precision)
 The standard metric for object detection accuracy. mAP@0.5 means "average precision at IoU threshold 0.5." Higher is better. Our target for the finetuned YOLO is mAP@0.5 >= 0.55.
 
+### Morphological operations
+Image processing techniques that operate on shapes/structures in binary images. Common ones: **dilation** (grow regions), **erosion** (shrink regions), **opening** (erosion then dilation — removes small noise), **closing** (dilation then erosion — fills small gaps). We use dilation in frontier detection.
+
 ### NMS (Non-Maximum Suppression)
 When a detector produces multiple overlapping boxes for the same object, NMS keeps only the highest-confidence one and removes the rest. The `iou=0.5` parameter means: if two boxes have IoU > 0.5, the weaker one is suppressed.
+
+### Occupancy grid
+A 2D grid where each cell records whether that physical location is free (passable), occupied (blocked by an obstacle), or unknown (not yet observed). The fundamental data structure for 2D robot navigation — the planner uses it to find paths, and the explorer uses it to find frontiers.
 
 ### OpenGL convention
 A coordinate system where the camera looks along the **negative Z axis**, with X pointing right and Y pointing up. Habitat uses this convention. It's different from some robotics conventions where Z is forward.
@@ -669,6 +882,9 @@ A 4x4 matrix encoding an object's position and orientation in 3D space:
 [ 0 | 1 ]     t = 3x1 translation (position)
 ```
 SE(3) = "Special Euclidean group in 3 dimensions" — the mathematical group of all rotations and translations in 3D.
+
+### Ray clearing
+A technique for building occupancy maps. When a depth sensor sees an obstacle at distance D, we know that everything between the sensor and the obstacle (distance 0 to D) must be free space (otherwise the sensor couldn't see through it). We "clear" those intermediate cells by marking them as free. Implemented using Bresenham's line algorithm to efficiently find which grid cells the ray passes through.
 
 ### Quaternion
 A 4-component number `(w, x, y, z)` used to represent 3D rotations. More compact than a 3x3 rotation matrix (4 numbers vs 9) and avoids **gimbal lock** (a problem where Euler angles lose a degree of freedom at certain orientations). Habitat stores rotations as quaternions internally.
