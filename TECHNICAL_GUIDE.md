@@ -2,7 +2,7 @@
 
 > **What this document is.** A detailed, beginner-friendly reference for every concept, technique, and design decision in the GOAT-Lite codebase. If you or your teammate encounter a term you don't understand, look it up here. This document is updated as we build new modules.
 >
-> **Last updated:** Week 6 (goal matching + midterm demo complete).
+> **Last updated:** Week 7 (planner + frontier exploration + action selection complete).
 
 ---
 
@@ -20,8 +20,12 @@
    - 3.7 [Frontier Detection (`src/mapping/frontier.py`)](#37-frontier-detection)
    - 3.8 [Instance Memory Database (`src/memory/instance_db.py`)](#38-instance-memory-database)
    - 3.9 [Goal Matcher (`src/matching/goal_matcher.py`)](#39-goal-matcher)
-   - 3.10 [Seed Utility (`src/utils/seeds.py`)](#310-seed-utility)
-   - 3.11 [Smoke Test (`scripts/smoke_test.py`)](#311-smoke-test)
+   - 3.10 [A* Planner (`src/planning/astar.py`)](#310-a-planner)
+   - 3.11 [Fast Marching Planner (`src/planning/fmm.py`)](#311-fast-marching-planner)
+   - 3.12 [Frontier Exploration Policy (`src/planning/exploration.py`)](#312-frontier-exploration-policy)
+   - 3.13 [Action Selection (`src/agent/action.py`)](#313-action-selection)
+   - 3.14 [Seed Utility (`src/utils/seeds.py`)](#314-seed-utility)
+   - 3.15 [Smoke Test (`scripts/smoke_test.py`)](#315-smoke-test)
 4. [Testing Strategy](#4-testing-strategy)
 5. [Glossary of Key Terms](#5-glossary-of-key-terms)
 
@@ -773,7 +777,148 @@ The first end-to-end pipeline test (requires Habitat + a scene). It:
 
 ---
 
-### 3.10 Seed Utility
+### 3.10 A* Planner
+
+**File:** `src/planning/astar.py`
+**Built in:** Week 7
+
+#### What it does
+
+Given a start position and goal position on the occupancy grid, finds the shortest obstacle-free path between them. This is how the agent navigates to a known target — the planner computes the route, then the action selector executes it step by step.
+
+#### How A* works
+
+A* is the gold-standard graph search algorithm for pathfinding. It's like Dijkstra's algorithm (finds shortest paths) but with a **heuristic** that guides the search toward the goal, making it much faster.
+
+For each cell it considers, A* computes:
+```
+f(cell) = g(cell) + h(cell)
+```
+- **g(cell)** = actual cost to reach this cell from the start (accumulated step by step)
+- **h(cell)** = heuristic estimate of remaining cost to reach the goal (we use Euclidean distance — straight-line, which never overestimates, making A* optimal)
+- **f(cell)** = total estimated cost through this cell
+
+A* always expands the cell with the lowest f-score next. This means it explores toward the goal first, avoiding wasted exploration in the wrong direction.
+
+#### 8-connected grid
+
+Each cell has 8 neighbors (up, down, left, right, and 4 diagonals). Moving to a cardinal neighbor costs 1.0, moving diagonally costs √2 ≈ 1.414 (the actual Euclidean distance).
+
+#### Obstacle inflation
+
+Real robots aren't point-sized. If the planner finds a path that passes 1 cell (5cm) from a wall, the physical robot (17cm radius) would clip the wall.
+
+**Inflation** expands obstacles by `inflate_cells` (default 4 = 20cm) in all directions using binary dilation. Cells near obstacles get a penalty cost (`obstacle_penalty=3.0`) rather than being fully blocked — this lets the planner find paths through tight spaces if necessary, but prefers routes with clearance.
+
+#### Implementation details
+
+- Uses Python's `heapq` for the priority queue — efficient O(log n) push/pop
+- `g_score` stored as a 2D numpy array for O(1) lookup
+- `came_from` dictionary for path reconstruction — walk backwards from goal to start
+- `closed` set as a boolean array to avoid re-expanding cells
+- Counter in heap entries breaks ties consistently (avoids comparing tuples of equal f-score)
+
+#### Performance
+
+On a 480x480 grid (our real map size): < 2 seconds worst case. Typical paths take ~50-200ms depending on length and obstacle density.
+
+---
+
+### 3.11 Fast Marching Planner
+
+**File:** `src/planning/fmm.py`
+**Built in:** Week 7
+
+#### What it does
+
+An alternative to A* that produces **smoother paths**. Uses the Fast Marching Method (FMM) — a continuous wavefront propagation algorithm. Think of dropping a pebble in water and watching the ripples expand; FMM computes how long it takes for the "wave" to reach each cell from the goal.
+
+#### How it works
+
+1. Set travel time at goal = 0, everywhere else = ∞
+2. Propagate the wavefront outward through free cells (via `skfmm.travel_time`)
+3. From the start, follow the gradient of decreasing travel time downhill to the goal — this naturally produces a smooth path
+
+#### Why have both A* and FMM?
+
+- **A*** produces paths with sharp corners (grid-aligned turns). Fast, guaranteed optimal on the grid.
+- **FMM** produces smoother, more natural-looking paths. Better for actual robot execution. But requires the `skfmm` library (optional dependency).
+
+The agent can config-select between them. Default is A* since skfmm may not be installed.
+
+---
+
+### 3.12 Frontier Exploration Policy
+
+**File:** `src/planning/exploration.py`
+**Built in:** Week 7
+
+#### What it does
+
+When the agent doesn't know where its goal is, it needs to explore. This module decides **which frontier to explore next** — the "where should I go to discover new areas?" decision.
+
+#### The scoring function
+
+```
+score = frontier.size / (distance_to_agent + 1)
+```
+
+This balances two objectives:
+- **Larger frontiers** are more promising — they likely lead to big unexplored areas
+- **Closer frontiers** are cheaper to reach — no point crossing the entire map for a slightly bigger frontier
+
+The `+1` prevents division by zero when the frontier is right next to the agent.
+
+#### Visited frontier tracking
+
+Once the agent has navigated to a frontier and explored it, that frontier's centroid is added to the `visited` set. Future calls to `choose_frontier` will skip any frontier whose centroid is within `visit_radius` (default 10 cells = 50cm) of a visited centroid. This prevents the agent from repeatedly going back to the same explored area.
+
+---
+
+### 3.13 Action Selection
+
+**File:** `src/agent/action.py`
+**Built in:** Week 7
+
+#### What it does
+
+Converts a high-level path (list of grid cells) into low-level actions (forward, turn left, turn right). This is the "motor control" layer — given where the agent is and where it needs to go, what's the next physical action?
+
+#### The algorithm
+
+```python
+path_to_action(agent_ij, heading, next_ij) -> action
+```
+
+1. Compute the **desired heading** — the angle from the agent to the next waypoint using `atan2(dc, dr)`
+2. Compute the **angular difference** between current heading and desired heading
+3. Wrap the difference to [-π, π] to handle the 359°→1° boundary correctly
+4. Decision:
+   - If angular error < `angle_tolerance` (20°): go **forward** (close enough to the right direction)
+   - If error is positive: **turn right** (target is to the right)
+   - If error is negative: **turn left** (target is to the left)
+   - If already at the waypoint: **stop**
+
+#### Heading convention
+
+```
+heading = 0    → facing +row direction (toward higher row indices)
+heading = π/2  → facing +col direction (toward higher col indices)
+```
+
+This matches the grid's row/col layout. The agent turns 30° per turn action, so it may need multiple turns to face the right direction before moving forward.
+
+#### Angle wrapping
+
+The most common bug in heading-based navigation. Without wrapping, an agent facing at 350° wanting to turn to 10° would compute a difference of -340° and spin almost all the way around. Wrapping to [-π, π] correctly gives +20° — a small right turn.
+
+```python
+diff = (diff + math.pi) % (2 * math.pi) - math.pi
+```
+
+---
+
+### 3.14 Seed Utility
 
 **File:** `src/utils/seeds.py`
 **Built in:** Week 1
@@ -796,7 +941,7 @@ The `try/except` around the torch import means this function works even in conte
 
 ---
 
-### 3.11 Smoke Test
+### 3.15 Smoke Test
 
 **File:** `scripts/smoke_test.py`
 **Built in:** Week 1
@@ -895,6 +1040,17 @@ This is called **duck typing** — FakeDetector isn't a subclass of YOLODetector
 - Frontiers sorted by size descending
 - Frontier dataclass has correct fields (centroid_ij, size, cells)
 
+**Planner tests (19 tests in `tests/test_planner.py`, 2 skipped if skfmm missing):**
+- A* straight line path, path around wall via gap, no path when fully blocked
+- Start equals goal returns single-cell path, adjacent cells return 2-cell path
+- Diagonal path is shorter than Manhattan distance
+- Obstacle inflation keeps path away from walls
+- Out-of-bounds start returns None, goal on occupied returns None
+- Large 480x480 map completes in < 2 seconds
+- FMM straight line path (skipped if skfmm missing), FMM no path when blocked
+- Frontier exploration: chooses nearest-large, skips visited, returns None when empty
+- Action selection: forward when facing target, turn left/right when target is to the side, stop when at goal
+
 **Goal matcher tests (10 tests in `tests/test_matcher.py`):**
 - Category matching finds existing class and returns highest-confidence node
 - Category matching returns None for non-existent class
@@ -927,6 +1083,12 @@ This is called **duck typing** — FakeDetector isn't a subclass of YOLODetector
 ---
 
 ## 5. Glossary of Key Terms
+
+### A* (A-star)
+A graph search algorithm that finds the shortest path between two points. Combines the actual cost to reach a cell (g) with a heuristic estimate of remaining cost (h). By always expanding the most promising cell (lowest g+h), it finds optimal paths while exploring far fewer cells than brute-force search. The heuristic must never overestimate (be "admissible") — we use Euclidean distance, which is always ≤ the true path length.
+
+### Angle wrapping
+Correcting angular differences to the range [-π, π] to handle the discontinuity at ±180°. Without wrapping, the difference between 350° and 10° would be -340° instead of the correct +20°. Formula: `diff = (diff + π) % (2π) - π`.
 
 ### Back-projection
 The reverse of what a camera does. A camera **projects** 3D points onto a 2D image (losing depth). **Back-projection** uses a known depth value to recover the original 3D position from a 2D pixel coordinate.
@@ -999,11 +1161,17 @@ fp16 uses half the memory and is faster on modern GPUs, but can cause numerical 
 ### Frontier
 In exploration robotics, a frontier is the boundary between known free space and unknown space. It's the most informative place to go — moving to a frontier will reveal new areas. Our agent navigates to the largest nearby frontier when it doesn't know where its goal is.
 
+### Fast Marching Method (FMM)
+A numerical algorithm that simulates wavefront propagation — like dropping a stone in water and measuring when the ripples reach each point. Used for pathfinding by propagating from the goal, then following the gradient downhill from the start. Produces smoother paths than A* because it operates in continuous space rather than on a discrete grid.
+
 ### FOV (Field of View)
 How wide the camera's "cone of vision" is, in degrees. Our camera uses 90° horizontal FOV — it can see 45° to the left and 45° to the right of center. A wider FOV sees more but with more distortion.
 
 ### Gradient
 In neural networks, gradients tell you how to adjust model weights to reduce error. During inference (using a trained model), we don't need gradients, so we use `torch.no_grad()` to skip computing them — this saves ~50% of memory.
+
+### Heuristic (in search algorithms)
+An estimate of the remaining cost from a given state to the goal. In A*, the Euclidean distance heuristic estimates the straight-line distance to the goal. A "good" heuristic is close to the true cost but never overestimates (admissible), which guarantees A* finds the optimal path.
 
 ### Habitat / habitat-sim
 Facebook AI Research's 3D simulation platform. It renders photorealistic indoor scenes from the HM3D (Habitat-Matterport 3D) dataset and lets virtual agents navigate them. It's the "game engine" our agent lives in.
@@ -1035,6 +1203,9 @@ When a detector produces multiple overlapping boxes for the same object, NMS kee
 
 ### Merging (instance memory)
 The process of combining multiple observations of the same physical object into a single memory node. Our merging uses two gates: spatial proximity (within 0.75m) AND embedding similarity (cosine > 0.85). When merging, position and embedding are updated via running mean, confidence via running max, and the best thumbnail is kept. This deduplication is critical — without it, 100 detections of one chair would create 100 nodes instead of 1.
+
+### Obstacle inflation
+Expanding obstacles on the occupancy grid by the robot's radius so the planner treats the robot as a point. If a wall is inflated by 4 cells (20cm), any path the point-robot finds through the inflated grid will have at least 20cm clearance from the real wall — enough for the physical robot (17cm radius) to pass safely.
 
 ### Occupancy grid
 A 2D grid where each cell records whether that physical location is free (passable), occupied (blocked by an obstacle), or unknown (not yet observed). The fundamental data structure for 2D robot navigation — the planner uses it to find paths, and the explorer uses it to find frontiers.
