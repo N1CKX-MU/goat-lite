@@ -732,6 +732,30 @@ class GoatAgent:
 
 ### 7.9 Week 9 — Development eval + debugging
 
+> **STATUS (2026-08-08) — pick up here tomorrow.**
+> Week 9 blocked on one thing: the detector. Baseline SR = 0% because the stock
+> COCO YOLOv8n can't see 30/36 GOAT categories. Fix in flight: friend is
+> finetuning YOLOv8n on HM3D-Semantics → will send back `checkpoints/yolo_goat.pt`
+> (see `TRAIN_YOLO.md`). All wiring + two control bugs already fixed and pushed:
+> - matcher image-modality routing, FSM premature-quit (commit 3398064)
+> - **heading convention in `path_to_action`** (commit 2f7693d) — VERIFIED
+>   end-to-end in sim: agent turns the correct way in all 4 directions and
+>   drives to target. Was inverted 180° + swapped turn signs → spin-in-place.
+>
+> **Tomorrow's checklist (in order):**
+> 1. [ ] Drop `yolo_goat.pt` into `checkpoints/` once it arrives; confirm it loads:
+>        `python -c "from ultralytics import YOLO; m=YOLO('checkpoints/yolo_goat.pt'); print(len(m.names))"` (expect 36).
+> 2. [ ] Smoke test: run `python scripts/run_dev_eval.py --n-episodes 2` and
+>        confirm **SR > 0** (proves detector + control now close the loop).
+> 3. [ ] If SR>0: launch full 30-ep dev eval in BACKGROUND with `python -u`
+>        (buffered stdout otherwise), notify-on-done.
+> 4. [ ] Diagnose top failure bucket from `failures.jsonl`, one fix cycle.
+> 5. [ ] Then proceed to Week 10 ablations below.
+>
+> If SR still 0 after the finetuned detector: check (a) cls_name equality
+> between detector vocab and GOAT categories, (b) `success_distance`/`world_xyz`
+> noise, (c) whether `image` subtasks localize by category as intended.
+
 **Prereqs:** Week 8 done.
 
 **Both people: `src/eval/runner.py` and `src/eval/metrics.py`**
