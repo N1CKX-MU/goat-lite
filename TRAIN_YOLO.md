@@ -10,6 +10,58 @@ for the 36 GOAT categories → finetune YOLOv8n → export `yolo_goat.pt`.
 
 ---
 
+## 0. Running this on Windows (WSL2) — added 2026-08-10
+
+habitat-sim has **no Windows build** (no `win-64` package on any channel), so the
+render step cannot run natively. It does run in WSL2, but WSL has no NVIDIA
+EGL/GLX driver (`/usr/lib/wsl/lib` ships no `libEGL_nvidia.so`), so habitat's
+default GPU path aborts with:
+
+```
+Platform::WindowlessEglApplication::tryCreateContext(): unable to find CUDA
+device 0 among 1 EGL devices in total
+```
+
+Hardware GL in WSL comes from Mesa's **d3d12** gallium driver talking to
+`/dev/dxg`. Working setup:
+
+```bash
+sudo apt-get install -y git-lfs build-essential mesa-utils
+git lfs install                      # else GLBs arrive as 133-byte LFS pointers
+
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH
+export GALLIUM_DRIVER=d3d12          # else Mesa falls back to llvmpipe (CPU)
+export EGL_PLATFORM=surfaceless      # GBM/device platforms fail: no /dev/dri
+export MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA   # else it picks the Intel iGPU
+export HABITAT_GPU_DEVICE_ID=-1      # skip Magnum's EGL<->CUDA device match
+```
+
+`HABITAT_GPU_DEVICE_ID` is read by `HabitatEnv` and `make_yolo_dataset.py`;
+it defaults to 0, so native-Linux machines are unaffected. Verified: RGB +
+semantic at 512x512, **~128 fps** on an RTX 3050 Laptop (4 GB).
+
+Gotchas that cost real time here:
+
+- **git-lfs**: without it every `.glb` is a text pointer and habitat fails with
+  `Utility::Json: unexpected v` (the file starts `version https://git-lfs...`).
+- **numpy**: torch/ultralytics pull numpy 2.x, which breaks habitat-sim's
+  quaternion extension (`_ARRAY_API not found`). Pin `numpy==1.26.4`, and use
+  `opencv-python-headless==4.10.0.84` + `pillow==10.4.0`, which are the last
+  numpy-1.x-compatible releases.
+- **requirements.txt is not installable as written** in this env: `numpy==1.24.4`
+  conflicts with habitat-sim, and `ultralytics==8.1.34` calls `torch.load()`
+  without `weights_only=False`, which torch>=2.6 rejects. Use ultralytics 8.4.x.
+- **scikit-fmm is missing from requirements.txt** but `src/planning/fmm.py`
+  needs it; without it the planner silently degrades to A*.
+- **WSL DNS** (`nameserver 10.255.255.254`) can stop resolving mid-session,
+  which looks exactly like an auth failure (`curl rc=6`). Put `1.1.1.1` in
+  `/etc/resolv.conf` and set `generateResolvConf = false` in `/etc/wsl.conf`.
+
+**VRAM measured on 4 GB (RTX 3050), imgsz 512:** batch 24 peaks at 2247 MiB, so
+batch 24-32 is safe; the `--batch 16` default below is conservative.
+
+---
+
 ## 1. Environment
 
 ```bash
