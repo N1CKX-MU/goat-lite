@@ -1,6 +1,15 @@
 # PyTorch (install separately with CUDA wheels - see PLAN.md Section 5.4)
 # torch==2.1.2
 # torchvision==0.16.2
+#
+# NOTE (2026-08-10): these pins are NOT installable alongside a conda
+# habitat-sim 0.3.3 build or torch >= 2.6. See TRAIN_YOLO.md Section 0.
+#   - numpy 1.24.4 breaks habitat-sim's quaternion ext (needs 1.26.x)
+#   - ultralytics 8.1.34 calls torch.load() without weights_only=False,
+#     which torch >= 2.6 rejects
+# Verified working combination on the Windows/WSL2 box:
+#   numpy 1.26.4, torch 2.6.0+cu124, ultralytics 8.4.117,
+#   opencv-python-headless 4.10.0.84, pillow 10.4.0, open_clip_torch 3.3.0
 
 # Perception
 ultralytics==8.1.34
@@ -10,6 +19,9 @@ open_clip_torch==2.24.0
 numpy==1.24.4
 scipy==1.11.4
 scikit-image==0.22.0
+# Required by src/planning/fmm.py. Without it compute_fmm_distance() returns
+# None and the agent silently degrades to the A* planner.
+scikit-fmm==2025.1.29
 opencv-python-headless==4.8.1.78
 matplotlib==3.7.4
 
