@@ -1,8 +1,21 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
+
+# Finetuned GOAT-vocabulary weights, produced by scripts/finetune_yolo.py.
+GOAT_WEIGHTS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "checkpoints",
+    "yolo_goat.pt",
+)
+
+
+def default_weights() -> str:
+    """Prefer the finetuned GOAT detector if present, else stock COCO YOLOv8n."""
+    return GOAT_WEIGHTS if os.path.exists(GOAT_WEIGHTS) else "yolov8n.pt"
 
 
 @dataclass
@@ -17,7 +30,7 @@ class Detection:
 class YOLODetector:
     def __init__(
         self,
-        weights: str = "yolov8n.pt",
+        weights: str | None = None,
         device: str = "cuda",
         fp16: bool = True,
         conf: float = 0.35,
@@ -26,6 +39,8 @@ class YOLODetector:
     ):
         from ultralytics import YOLO
 
+        if weights is None:
+            weights = default_weights()
         self._model = YOLO(weights)
         self._model.to(device)
         self._model.fuse()

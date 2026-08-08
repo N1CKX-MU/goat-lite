@@ -164,6 +164,16 @@ class TestStateTransitions:
         # since we're within success_distance
         assert agent.state in (AgentState.APPROACHING, AgentState.VERIFYING)
 
+    def test_searching_surveys_before_giving_up(self):
+        """With no match and no frontiers, the agent should keep surveying
+        (turning) rather than quitting after a couple of steps."""
+        agent = _make_agent(matcher=FakeMatcher(result=(None, 0.0)))
+        agent.reset(_make_obs())
+        for _ in range(5):
+            action = agent.act(_make_obs())
+            assert agent.state == AgentState.SEARCHING
+            assert action == 2  # spin to survey, not stop
+
     def test_timeout_returns_stop(self):
         agent = _make_agent(max_steps=3)
         agent.reset(_make_obs())

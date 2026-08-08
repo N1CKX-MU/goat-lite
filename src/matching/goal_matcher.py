@@ -28,6 +28,10 @@ class GoalMatcher:
             return self._match_category(goal, db)
         elif goal.modality == "language":
             return self._match_language(goal, db)
+        elif goal.modality == "image":
+            # Image goals carry the target category in `value`; with the
+            # finetuned detector we localize the goal by that category.
+            return self._match_category(goal, db)
         else:
             return None, 0.0
 

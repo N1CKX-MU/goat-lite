@@ -70,10 +70,11 @@ def _make_goal_spec(subtask: SubtaskSpec) -> GoalSpec:
             subtask_index=subtask.subtask_index,
         )
     elif subtask.modality == "image":
-        # For image goals, fall back to category matching for now
-        # Full image goal support would require loading the reference image
+        # Image goals are localized by their target category (the finetuned
+        # detector emits GOAT categories directly). The matcher routes the
+        # "image" modality through category matching on this value.
         return GoalSpec(
-            modality="category",
+            modality="image",
             value=subtask.category,
             subtask_index=subtask.subtask_index,
         )

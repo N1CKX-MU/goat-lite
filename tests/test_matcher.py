@@ -111,6 +111,25 @@ class TestCategoryMatching:
         assert score == node.confidence
 
 
+class TestImageMatching:
+    def test_image_modality_routes_to_category(self):
+        """Image goals carry the target category in value and match by category."""
+        db = _make_db_with_nodes()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="image", value="chair")
+        node, score = matcher.match(goal, db)
+        assert node is not None
+        assert node.cls_name == "chair"
+
+    def test_image_modality_no_match_returns_none(self):
+        db = _make_db_with_nodes()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="image", value="toilet")
+        node, score = matcher.match(goal, db)
+        assert node is None
+        assert score == 0.0
+
+
 class TestLanguageMatching:
     def test_returns_best_embedding_match(self):
         """Language matching should return the node with highest cosine similarity."""

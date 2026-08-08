@@ -14,6 +14,14 @@ from src.mapping.frontier import find_frontiers
 from src.agent.action import path_to_action
 
 
+# Turn ~360° (30°/turn) surveying for frontiers before concluding the area is
+# exhausted. Giving up after only a couple of turns quits with a near-empty map.
+SEARCH_GIVEUP_TURNS = 12
+# When a matched node is unreachable, try a few replans/turns before falling
+# back to exploration rather than stopping (a stop counts as failure).
+APPROACH_GIVEUP_TURNS = 4
+
+
 class AgentState(enum.Enum):
     SEARCHING = "searching"
     APPROACHING = "approaching"
@@ -154,9 +162,13 @@ class GoatAgent:
 
             if self._current_path is None:
                 self._no_plan_count += 1
-                if self._no_plan_count >= 2:
-                    self.state = AgentState.DONE
-                    return 0
+                if self._no_plan_count >= APPROACH_GIVEUP_TURNS:
+                    # Can't reach the matched node — go explore for a better
+                    # vantage instead of stopping (which would count as failure).
+                    self.state = AgentState.SEARCHING
+                    self._matched_node = None
+                    self._current_path = None
+                    self._no_plan_count = 0
                 return 2  # turn to try to find a way
             else:
                 self._no_plan_count = 0
@@ -176,10 +188,10 @@ class GoatAgent:
 
             if target is None:
                 self._no_plan_count += 1
-                if self._no_plan_count >= 2:
+                if self._no_plan_count >= SEARCH_GIVEUP_TURNS:
                     self.state = AgentState.DONE
                     return 0
-                return 2  # spin
+                return 2  # spin to survey for frontiers
 
             self._current_path = plan_astar(occ, agent_ij, target.centroid_ij)
             self._path_idx = 0
@@ -187,7 +199,7 @@ class GoatAgent:
             if self._current_path is None:
                 self._visited_frontiers.add(target.centroid_ij)
                 self._no_plan_count += 1
-                if self._no_plan_count >= 2:
+                if self._no_plan_count >= SEARCH_GIVEUP_TURNS:
                     self.state = AgentState.DONE
                     return 0
                 return 2
