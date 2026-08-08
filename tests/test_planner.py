@@ -164,13 +164,13 @@ class TestChooseFrontier:
 class TestActionSelection:
     def test_forward_when_facing_target(self):
         from src.agent.action import path_to_action
-        # Agent at (10,10) facing along +col (heading=0 means facing +Z which maps to +row)
-        # Target is the next cell in the path
-        # heading=pi/2 means facing +col direction
+        # Habitat convention: forward(h) = (-cos h, -sin h) in (row, col).
+        # Target is at +col (dc=+1, dr=0); to face it we need forward = (0, +1),
+        # i.e. -sin h = 1 -> h = -pi/2.
         action = path_to_action(
             agent_ij=(10, 10),
-            heading=math.pi / 2,  # facing +col
-            next_ij=(10, 11),     # target is +col
+            heading=-math.pi / 2,  # forward points toward +col
+            next_ij=(10, 11),      # target is +col
             step_size_cells=1,
         )
         assert action == 1  # forward

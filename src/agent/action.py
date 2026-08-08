@@ -17,7 +17,9 @@ def path_to_action(
 
     Args:
         agent_ij: (row, col) current agent position on the grid.
-        heading: agent heading in radians. 0 = facing +row, pi/2 = facing +col.
+        heading: agent compass heading in radians (Habitat convention). At
+            heading 0 the agent's forward is -Z (grid -row); heading increases
+            CW viewed from above. So forward(h) = (-cos h, -sin h) in (row, col).
         next_ij: (row, col) next waypoint on the path.
         step_size_cells: how many cells one forward step covers.
         turn_angle: how much one turn action rotates (radians).
@@ -36,9 +38,9 @@ def path_to_action(
     if dr == 0 and dc == 0:
         return 0  # stop
 
-    # Desired heading: angle from agent to target
-    # Convention: 0 = +row direction, pi/2 = +col direction
-    desired = math.atan2(dc, dr)
+    # Desired heading such that forward(h) = (-cos h, -sin h) points at the
+    # target direction (dr, dc). Solving gives h = atan2(-dc, -dr).
+    desired = math.atan2(-dc, -dr)
 
     # Angular difference (signed, wrapped to [-pi, pi])
     diff = desired - heading
@@ -47,7 +49,8 @@ def path_to_action(
     if abs(diff) <= angle_tolerance:
         return 1  # forward
 
+    # turn_left (2) increases compass heading; turn_right (3) decreases it.
     if diff > 0:
-        return 3  # turn right (increase heading)
+        return 2  # turn left (increase heading)
     else:
-        return 2  # turn left (decrease heading)
+        return 3  # turn right (decrease heading)
