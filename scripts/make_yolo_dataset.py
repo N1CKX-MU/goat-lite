@@ -29,7 +29,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.perception.goat_classes import GOAT_CATEGORIES, name_to_id
+from src.perception.goat_classes import GOAT_CATEGORIES, hm3d_name_to_id
 
 
 def find_scenes(hm3d_root: str) -> list[tuple[str, str]]:
@@ -50,14 +50,48 @@ def find_scenes(hm3d_root: str) -> list[tuple[str, str]]:
     return scenes
 
 
-def make_sim(scene_glb: str, resolution: int, seed: int):
+def find_scene_dataset_config(hm3d_root: str) -> str | None:
+    """Locate HM3D's annotated scene-dataset config.
+
+    Without it habitat loads the .basis.glb as a bare stage, looks for a
+    sibling ``<scene>.basis.scn`` that does not exist, and ends up with an empty
+    semantic scene -- every frame then yields zero boxes. The annotated config
+    is what declares ``semantic_asset: <name>.semantic.glb`` and
+    ``semantic_descriptor_filename: <name>.semantic.txt``.
+
+    Searched in the scene root and its parent, preferring the all-splits config.
+    """
+    names = (
+        "hm3d_annotated_basis.scene_dataset_config.json",
+        "hm3d_annotated_train_basis.scene_dataset_config.json",
+        "hm3d_annotated_val_basis.scene_dataset_config.json",
+    )
+    for d in (hm3d_root, os.path.dirname(os.path.abspath(hm3d_root))):
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.exists(p):
+                return p
+    return None
+
+
+def make_sim(
+    scene_glb: str,
+    resolution: int,
+    seed: int,
+    gpu_device_id: int = 0,
+    scene_dataset_config: str | None = None,
+):
     import habitat_sim
 
     backend = habitat_sim.SimulatorConfiguration()
     backend.scene_id = scene_glb
-    backend.scene_dataset_config_file = "default"
+    backend.scene_dataset_config_file = scene_dataset_config or "default"
     backend.enable_physics = False
     backend.random_seed = seed
+    # -1 disables Magnum's EGL<->CUDA device matching. Required under WSL2,
+    # where GL comes from Mesa's d3d12 driver and no EGL device reports a CUDA
+    # id, so the default (0) fails with "unable to find CUDA device 0".
+    backend.gpu_device_id = gpu_device_id
 
     rgb = habitat_sim.CameraSensorSpec()
     rgb.uuid = "rgb"
@@ -91,7 +125,7 @@ def instance_to_class(sim) -> dict[int, int]:
             cat = obj.category.name()
         except Exception:
             continue
-        cls_id = name_to_id(cat)
+        cls_id = hm3d_name_to_id(cat)
         if cls_id is None:
             continue
         raw = getattr(obj, "semantic_id", None)
@@ -163,6 +197,19 @@ def main() -> None:
     ap.add_argument("--max-area-frac", type=float, default=0.6)
     ap.add_argument("--val-frac", type=float, default=0.1, help="fraction of scenes held out for val")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--gpu-device-id",
+        type=int,
+        default=int(os.environ.get("HABITAT_GPU_DEVICE_ID", "0")),
+        help="habitat GPU device id; use -1 under WSL2 (no CUDA-capable EGL device). "
+             "Defaults to $HABITAT_GPU_DEVICE_ID, else 0.",
+    )
+    ap.add_argument(
+        "--scene-dataset-config",
+        default=None,
+        help="HM3D annotated scene_dataset_config.json. Auto-detected from "
+             "--hm3d-root if omitted. Required for semantics to load at all.",
+    )
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -174,6 +221,18 @@ def main() -> None:
             f"No scenes with semantics under {args.hm3d_root}. "
             "Need HM3D train GLBs + HM3D-Semantics (*.semantic.glb/.txt)."
         )
+    scene_dataset_config = args.scene_dataset_config or find_scene_dataset_config(
+        args.hm3d_root
+    )
+    if scene_dataset_config is None:
+        raise SystemExit(
+            "Could not find an HM3D annotated scene_dataset_config.json near "
+            f"{args.hm3d_root}. Without it habitat loads no semantics and every "
+            "label file comes out empty. Download the *-semantic-configs-* tar, "
+            "or pass --scene-dataset-config explicitly."
+        )
+    print(f"Scene dataset config: {scene_dataset_config}")
+
     random.shuffle(scenes)
     n_val = max(1, int(len(scenes) * args.val_frac))
     val_scenes = set(range(n_val))
@@ -184,10 +243,28 @@ def main() -> None:
         os.makedirs(os.path.join(args.out, "labels", split), exist_ok=True)
 
     total_imgs = total_boxes = 0
+    scenes_without_goat = 0
     for si, (scene_glb, _sem_glb) in enumerate(scenes):
+        # Fail fast rather than spending hours writing an empty dataset: if the
+        # first handful of scenes yield no GOAT instances, the semantic mapping
+        # is broken, not merely sparse.
+        if si == 5 and total_boxes == 0:
+            raise SystemExit(
+                f"Aborting: {scenes_without_goat}/5 scenes produced no GOAT "
+                "instances and no boxes were written.\n"
+                "Check (a) the scene dataset config actually resolves "
+                "*.semantic.glb, (b) HM3D category names still match "
+                "src/perception/goat_classes.py."
+            )
         split = "val" if si in val_scenes else "train"
         try:
-            sim = make_sim(scene_glb, args.resolution, args.seed + si)
+            sim = make_sim(
+                scene_glb,
+                args.resolution,
+                args.seed + si,
+                args.gpu_device_id,
+                scene_dataset_config,
+            )
         except Exception as e:
             print(f"  [skip] {scene_glb}: {e}")
             continue
@@ -195,6 +272,7 @@ def main() -> None:
         inst_to_cls = instance_to_class(sim)
         if not inst_to_cls:
             print(f"  [skip] {os.path.basename(scene_glb)}: no GOAT instances")
+            scenes_without_goat += 1
             sim.close()
             continue
 

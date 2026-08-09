@@ -63,5 +63,48 @@ def normalize(name: str) -> str:
 
 
 def name_to_id(name: str) -> int | None:
-    """Return the class id for a category name, or None if not a GOAT category."""
+    """Return the class id for a category name, or None if not a GOAT category.
+
+    Exact match against the GOAT vocabulary. Use this wherever the emitted class
+    name matters (matcher, detector output).
+    """
     return NAME_TO_ID.get(normalize(name))
+
+
+# HM3D-Semantics annotators use free-form strings, so a number of instances
+# describe a GOAT category under a different surface form. Without these, whole
+# classes lose their training data: a 12-scene census found "stairs" 65 times vs
+# "stair" 5, and "island" appeared *only* as "kitchen island".
+#
+# Curated deliberately -- only strings denoting the same physical object. These
+# near-misses were rejected as different objects: "book rack", "piano stool",
+# "piano bench", "mirror frame", "refrigerator cabinet", "stair wall",
+# "stair handle", "glasses" (eyewear, not a glass surface).
+#
+# Ingestion-side only. It never changes the 36 emitted class names.
+HM3D_CATEGORY_ALIASES: dict[str, str] = {
+    "stairs": "stair",
+    "clothes hanger": "hanger",
+    "cloth hanger": "hanger",
+    "wall hanger": "hanger",
+    "kitchen island": "island",
+    "staircase handrail": "handrail",
+    "cook book": "book",
+    "fur carpet": "carpet",
+    "exhibition picture": "picture",
+    "stained glass": "glass",
+}
+
+
+def hm3d_name_to_id(name: str) -> int | None:
+    """Map a raw HM3D-Semantics category string to a GOAT class id.
+
+    Exact GOAT match first, then the curated alias table. Used when building the
+    detector's training set from HM3D annotations.
+    """
+    key = normalize(name)
+    direct = NAME_TO_ID.get(key)
+    if direct is not None:
+        return direct
+    alias = HM3D_CATEGORY_ALIASES.get(key)
+    return NAME_TO_ID.get(alias) if alias else None
