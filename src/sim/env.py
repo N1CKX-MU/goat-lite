@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import habitat_sim
@@ -36,6 +37,17 @@ ACTION_MAP = {
 }
 
 
+def default_gpu_device_id() -> int:
+    """habitat GPU device id, overridable via ``HABITAT_GPU_DEVICE_ID``.
+
+    Must be -1 under WSL2: there is no NVIDIA EGL driver there, GL is served by
+    Mesa's d3d12 backend, and no EGL device advertises a CUDA id -- so the
+    default of 0 aborts with "unable to find CUDA device 0". On a normal Linux
+    box with the NVIDIA driver, leave it at 0.
+    """
+    return int(os.environ.get("HABITAT_GPU_DEVICE_ID", "0"))
+
+
 class HabitatEnv:
     def __init__(
         self,
@@ -46,6 +58,7 @@ class HabitatEnv:
         step_size: float = 0.25,
         turn_angle: float = 30.0,
         seed: int = 42,
+        gpu_device_id: int | None = None,
     ):
         set_seed(seed)
         self._resolution = resolution
@@ -55,6 +68,9 @@ class HabitatEnv:
         backend_cfg.scene_id = scene_path
         backend_cfg.enable_physics = False
         backend_cfg.random_seed = seed
+        backend_cfg.gpu_device_id = (
+            default_gpu_device_id() if gpu_device_id is None else gpu_device_id
+        )
 
         agent_cfg = habitat_sim.agent.AgentConfiguration()
         agent_cfg.height = agent_height
