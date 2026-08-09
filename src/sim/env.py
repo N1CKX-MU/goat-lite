@@ -155,17 +155,36 @@ class HabitatEnv:
         return obs, False, info
 
     def get_pose(self) -> np.ndarray:
-        """Return 4x4 SE(3) pose matrix in world frame."""
+        """Return the 4x4 SE(3) **camera** pose in the world frame.
+
+        This must be the sensor pose, not the agent base pose: it is used to
+        back-project depth (``update_from_depth``, ``bbox_center_depth_to_world_xyz``)
+        and depth is measured from the camera. The sensors sit ``agent_height``
+        (1.41 m) above the agent's feet, so using the base pose puts all mapped
+        geometry 1.41 m too low -- the occupancy height band then samples the
+        ceiling instead of obstacles, the whole floor plan reads as occupied,
+        and A* can never find a path.
+        """
         state = self._agent.get_state()
-        pos = state.position
         rot = state.rotation
 
-        R = qt.as_rotation_matrix(rot)
+        # Prefer habitat's own sensor pose; fall back to the mount offset.
+        sensor_state = getattr(state, "sensor_states", {}).get("rgb")
+        if sensor_state is not None:
+            pos = sensor_state.position
+            rot = sensor_state.rotation
+        else:
+            p = state.position
+            pos = [float(p[0]), float(p[1]) + self._agent_height, float(p[2])]
 
         T = np.eye(4, dtype=np.float64)
-        T[:3, :3] = R
+        T[:3, :3] = qt.as_rotation_matrix(rot)
         T[:3, 3] = [float(pos[0]), float(pos[1]), float(pos[2])]
         return T
+
+    def get_floor_height(self) -> float:
+        """World Y of the surface the agent is standing on."""
+        return float(self._agent.get_state().position[1])
 
     def get_compass(self) -> float:
         """Return agent heading in radians (0 = +Z, increases CW viewed from above)."""
