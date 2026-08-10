@@ -25,11 +25,18 @@ class SemanticMap:
         floor_height: float = 0.0,
         min_height: float = 0.1,
         max_height: float = 1.5,
+        camera_height: float | None = None,
     ):
         self._size_m = size_m
         self._resolution = resolution_m
         self._num_classes = num_classes
         self._floor_height = floor_height
+        # When set, the floor is derived per-update as (camera Y - camera_height)
+        # instead of using the fixed floor_height. HM3D floors sit at arbitrary
+        # world Y (-0.54 in the first val scene, not 0), so a fixed absolute band
+        # samples the wrong slab of the scene -- typically the ceiling, which
+        # then marks the entire floor plan occupied.
+        self._camera_height = camera_height
         self._min_height = min_height
         self._max_height = max_height
 
@@ -47,6 +54,8 @@ class SemanticMap:
         self._class_counts = np.zeros(
             (self._grid_size, self._grid_size, num_classes), dtype=np.int16
         )
+        # Out-of-vocabulary class ids seen in update_from_detections().
+        self._dropped_cls_ids: set[int] = set()
 
     # ── Public accessors ──
 
@@ -96,9 +105,14 @@ class SemanticMap:
 
         # Height filter: keep points within [min_height, max_height] above floor
         heights = pc_world[:, 1]  # Y is up in Habitat
+        if self._camera_height is not None:
+            # pose translation is the camera; the floor is a fixed drop below it.
+            floor = float(pose[1, 3]) - self._camera_height
+        else:
+            floor = self._floor_height
         height_mask = (
-            (heights >= self._floor_height + self._min_height)
-            & (heights <= self._floor_height + self._max_height)
+            (heights >= floor + self._min_height)
+            & (heights <= floor + self._max_height)
         )
         pc_valid = pc_world[height_mask]
 
@@ -170,6 +184,15 @@ class SemanticMap:
         ], dtype=np.int16)
 
         for inst in instances:
+            # The map only has a channel per GOAT class. A detector with a
+            # different vocabulary (e.g. the stock COCO yolov8n fallback, which
+            # emits ids up to 79) would index out of bounds and crash the whole
+            # episode, so drop what the map cannot represent.
+            cls_id = int(inst.cls_id)
+            if not 0 <= cls_id < self._num_classes:
+                self._dropped_cls_ids.add(cls_id)
+                continue
+
             xz = np.array([inst.world_xyz[0], inst.world_xyz[2]])
             r, c = self.world_to_grid(xz)
 
@@ -179,4 +202,14 @@ class SemanticMap:
                     ci = c + dc
                     if 0 <= ri < gs and 0 <= ci < gs:
                         w = kernel[dr + half, dc + half]
-                        self._class_counts[ri, ci, inst.cls_id] += w
+                        self._class_counts[ri, ci, cls_id] += w
+
+    @property
+    def dropped_cls_ids(self) -> set[int]:
+        """Class ids seen but not representable in this map.
+
+        Non-empty almost always means the detector's vocabulary does not match
+        ``num_classes`` -- typically the finetuned GOAT weights are missing and
+        the detector silently fell back to COCO yolov8n.
+        """
+        return self._dropped_cls_ids

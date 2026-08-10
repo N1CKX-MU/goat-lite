@@ -203,3 +203,51 @@ class TestUpdateFromDetections:
         counts = sm.get_class_counts()
         assert np.any(counts[:, :, 5] > 0)
         assert np.any(counts[:, :, 10] > 0)
+
+
+class TestOutOfVocabularyDetections:
+    """The map has one channel per GOAT class. A detector with a different
+    vocabulary (the stock COCO yolov8n fallback emits ids up to 79) must not
+    index past the end of _class_counts and kill the episode."""
+
+    @staticmethod
+    def _inst(cls_id):
+        from src.perception.pipeline import PerceivedInstance
+        return PerceivedInstance(
+            cls_id=cls_id,
+            cls_name=f"cls{cls_id}",
+            conf=0.9,
+            bbox=(50, 50, 150, 150),
+            crop_thumbnail=np.zeros((64, 64, 3), dtype=np.uint8),
+            clip_embed=np.zeros(512, dtype=np.float32),
+            world_xyz=np.array([1.0, 0.5, 2.0]),
+            seen_step=0,
+        )
+
+    def test_class_id_beyond_num_classes_does_not_raise(self):
+        sm = SemanticMap(size_m=24.0, resolution_m=0.05, num_classes=37)
+        sm.update_from_detections([self._inst(69)])  # a COCO id
+        assert 69 in sm.dropped_cls_ids
+
+    def test_negative_class_id_dropped(self):
+        sm = SemanticMap(size_m=24.0, resolution_m=0.05, num_classes=37)
+        sm.update_from_detections([self._inst(-1)])
+        assert -1 in sm.dropped_cls_ids
+
+    def test_valid_detections_still_recorded_alongside_invalid(self):
+        sm = SemanticMap(size_m=24.0, resolution_m=0.05, num_classes=37)
+        sm.update_from_detections([self._inst(69), self._inst(5)])
+        counts = sm.get_class_counts()
+        assert np.any(counts[:, :, 5] > 0), "valid detection must survive"
+        assert sm.dropped_cls_ids == {69}
+
+    def test_boundary_id_is_valid(self):
+        sm = SemanticMap(size_m=24.0, resolution_m=0.05, num_classes=37)
+        sm.update_from_detections([self._inst(36)])  # last valid channel
+        assert sm.dropped_cls_ids == set()
+        assert np.any(sm.get_class_counts()[:, :, 36] > 0)
+
+    def test_no_drops_reported_for_clean_vocabulary(self):
+        sm = SemanticMap(size_m=24.0, resolution_m=0.05, num_classes=37)
+        sm.update_from_detections([self._inst(i) for i in range(0, 36, 7)])
+        assert sm.dropped_cls_ids == set()
