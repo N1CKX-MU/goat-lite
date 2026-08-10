@@ -10,7 +10,7 @@ import numpy as np
 import quaternion as qt
 
 from src.sim.env import HabitatEnv, GoalSpec, Observation
-from src.sim.goat_dataset import EpisodeSpec, SubtaskSpec
+from src.sim.goat_dataset import EpisodeSpec, SubtaskSpec, quaternion_from_coeffs
 from src.eval.metrics import subtask_success, compute_spl
 
 
@@ -110,7 +110,10 @@ def run_episode(
     agent_hab = env._agent
     state = habitat_sim.AgentState()
     state.position = episode.start_position.tolist()
-    state.rotation = qt.from_float_array(episode.start_rotation)
+    # habitat stores episode rotations as (x, y, z, w); from_float_array() reads
+    # (w, x, y, z) and would spawn the agent upside down. See
+    # quaternion_from_coeffs().
+    state.rotation = quaternion_from_coeffs(episode.start_rotation)
     agent_hab.set_state(state)
 
     for i, subtask in enumerate(episode.subtasks):
@@ -125,18 +128,26 @@ def run_episode(
         keep_memory = (i > 0)
         agent.reset(obs, keep_memory=keep_memory)
 
-        # Compute geodesic shortest path for SPL
-        if subtask.goal_info is not None:
-            goal_pos = subtask.goal_info.position
+        # Score against every instance that counts as this goal. Category
+        # subtasks have goal_key None and therefore no goal_info, but GOAT-Bench
+        # accepts any instance of the category -- using goal_info alone would
+        # mark all ~37% of category subtasks failed regardless of behaviour.
+        goal_positions = [c.position for c in subtask.goal_candidates]
+        if not goal_positions and subtask.goal_info is not None:
+            goal_positions = [subtask.goal_info.position]
+
+        if goal_positions:
             agent_pos_start = env.get_gps()
             start_3d = np.array([
                 agent_pos_start[0],
                 float(episode.start_position[1]),
                 agent_pos_start[1],
             ])
-            shortest_path = _geodesic_distance(sim, start_3d, goal_pos)
+            # Nearest reachable instance defines the optimal path for SPL.
+            shortest_path = min(
+                _geodesic_distance(sim, start_3d, p) for p in goal_positions
+            )
         else:
-            goal_pos = None
             shortest_path = float("inf")
 
         # Run the agent
@@ -175,7 +186,7 @@ def run_episode(
             final_pos_gps[1],
         ])
 
-        if goal_pos is not None:
+        if goal_positions:
             # Check if goal is in view by running perception on final frame
             final_obs = env._make_obs()
             detections = agent.perception.process(final_obs, step=steps)
@@ -184,17 +195,23 @@ def run_episode(
                 for d in detections
             )
 
+            # Closest qualifying instance decides success.
+            dists = [
+                float(np.sqrt(
+                    (final_pos_3d[0] - p[0]) ** 2 + (final_pos_3d[2] - p[2]) ** 2
+                ))
+                for p in goal_positions
+            ]
+            dist_to_goal = min(dists)
+            nearest = goal_positions[int(np.argmin(dists))]
+
             success = subtask_success(
                 agent_pos=final_pos_3d,
-                goal_pos=goal_pos,
+                goal_pos=nearest,
                 goal_in_view=goal_in_view,
             )
-
-            dx = final_pos_3d[0] - goal_pos[0]
-            dz = final_pos_3d[2] - goal_pos[2]
-            dist_to_goal = float(np.sqrt(dx * dx + dz * dz))
         else:
-            # No goal info — can't evaluate properly
+            # Genuinely no ground truth for this subtask — cannot be scored.
             success = False
             goal_in_view = False
             dist_to_goal = float("inf")

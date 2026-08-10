@@ -30,6 +30,12 @@ class SubtaskSpec:
     goal_key: str | None  # object_id for looking up in goals, None for category-only
     goal_info: GoalInfo | None = None
     subtask_index: int = 0
+    # Every instance that counts as reaching this goal. For language/image
+    # subtasks that is the one referenced instance; for category ("object")
+    # subtasks GOAT-Bench accepts ANY instance of the category, so this holds
+    # all of them. Evaluation must score against this list, not goal_info --
+    # category subtasks legitimately have goal_key None and hence no goal_info.
+    goal_candidates: list[GoalInfo] = field(default_factory=list)
 
 
 @dataclass
@@ -39,8 +45,38 @@ class EpisodeSpec:
     scene_id: str
     scene_dataset_config: str
     start_position: np.ndarray  # [3]
-    start_rotation: np.ndarray  # [4] quaternion
+    # [4] quaternion in habitat's JSON order: (x, y, z, w).
+    # NOT the (w, x, y, z) order numpy-quaternion's from_float_array expects --
+    # convert with quaternion_from_coeffs() below, never from_float_array().
+    start_rotation: np.ndarray
     subtasks: list[SubtaskSpec] = field(default_factory=list)
+
+
+def quaternion_from_coeffs(coeffs) -> "np.quaternion":
+    """Build a quaternion from habitat's JSON coefficient order (x, y, z, w).
+
+    numpy-quaternion's ``from_float_array`` reads (w, x, y, z), so passing a
+    habitat rotation straight to it silently reinterprets the components. For a
+    typical yaw-only episode start that turns into a ~180 degree roll: the agent
+    spawns upside down, the camera faces the floor, every depth point projects
+    below the occupancy height band, the map stays empty, no frontiers are found
+    and the agent gives up without moving. The forward vector survives the
+    mix-up unchanged, which is what makes it so hard to spot.
+    """
+    x, y, z, w = (float(c) for c in coeffs)
+    return np.quaternion(w, x, y, z)
+
+
+def _parse_goal(g: dict) -> GoalInfo:
+    """Build a GoalInfo from one raw GOAT-Bench goal entry."""
+    return GoalInfo(
+        object_category=g["object_category"],
+        object_id=g["object_id"],
+        position=np.array(g["position"], dtype=np.float64),
+        lang_desc=g.get("lang_desc", ""),
+        image_goals=g.get("image_goals", []),
+        view_points=g.get("view_points", []),
+    )
 
 
 def _normalize_modality(raw: str) -> str:
@@ -80,22 +116,20 @@ def load_scene_episodes(
             modality_raw = task[1]
             goal_key = task[2] if len(task) > 2 else None
 
-            # Look up goal info
+            # Every annotated instance of this category in this scene.
+            full_key = f"{scene_base}_{category}"
+            candidates = [_parse_goal(g) for g in goals_dict.get(full_key, [])]
+
             goal_info = None
             if goal_key is not None:
-                full_key = f"{scene_base}_{category}"
-                goal_list = goals_dict.get(full_key, [])
-                for g in goal_list:
-                    if g.get("object_id") == goal_key:
-                        goal_info = GoalInfo(
-                            object_category=g["object_category"],
-                            object_id=g["object_id"],
-                            position=np.array(g["position"], dtype=np.float64),
-                            lang_desc=g.get("lang_desc", ""),
-                            image_goals=g.get("image_goals", []),
-                            view_points=g.get("view_points", []),
-                        )
-                        break
+                # language / image: one specific instance is the target.
+                goal_info = next(
+                    (c for c in candidates if c.object_id == goal_key), None
+                )
+                goal_candidates = [goal_info] if goal_info is not None else []
+            else:
+                # category ("object"): reaching any instance counts.
+                goal_candidates = candidates
 
             subtasks.append(SubtaskSpec(
                 category=category,
@@ -103,6 +137,7 @@ def load_scene_episodes(
                 goal_key=goal_key,
                 goal_info=goal_info,
                 subtask_index=i,
+                goal_candidates=goal_candidates,
             ))
 
         episodes.append(EpisodeSpec(
