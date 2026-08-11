@@ -31,14 +31,18 @@ from src.eval.runner import run_episode, _resolve_scene_path
 from src.eval.report import save_results
 
 
-def build_agent(intrinsics: np.ndarray, device: str = "cuda") -> GoatAgent:
+def build_agent(
+    intrinsics: np.ndarray, device: str = "cuda", camera_height: float = 1.41
+) -> GoatAgent:
     """Build the full agent with all subsystems."""
     detector = YOLODetector(device=device)
     encoder = ClipEncoder(device=device)
     perception = PerceptionPipeline(detector, encoder, intrinsics)
     memory = InstanceDatabase()
     matcher = GoalMatcher(encoder)
-    semantic_map = SemanticMap()
+    # camera_height lets the map derive the floor from the camera pose instead
+    # of assuming floor Y == 0, which no HM3D scene satisfies.
+    semantic_map = SemanticMap(camera_height=camera_height)
 
     return GoatAgent(
         perception=perception,
@@ -113,6 +117,16 @@ def main():
                 print(f"ERROR: {e}")
                 import traceback
                 traceback.print_exc()
+
+        # A detector whose vocabulary does not match the map's num_classes is a
+        # silent correctness problem, not a crash, now that the map drops
+        # unrepresentable ids. Surface it loudly instead.
+        dropped = getattr(agent.semantic_map, "dropped_cls_ids", set())
+        if dropped:
+            print(f"  WARNING: dropped {len(dropped)} out-of-vocabulary class ids "
+                  f"from the semantic map, e.g. {sorted(dropped)[:8]}")
+            print("           The detector's classes do not match the GOAT "
+                  "vocabulary - is checkpoints/yolo_goat.pt present?")
 
         env.close()
 
