@@ -35,7 +35,9 @@ class YOLODetector:
         fp16: bool = True,
         conf: float = 0.35,
         iou: float = 0.5,
-        imgsz: int = 256,
+        # Matches the finetune resolution of yolo_goat.pt; training and
+        # inference resolutions must agree (PLAN.md Section 9, pitfall 4).
+        imgsz: int = 512,
     ):
         from ultralytics import YOLO
 

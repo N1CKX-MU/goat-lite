@@ -9,7 +9,9 @@ perception:
     weights: "checkpoints/yolo_goat.pt"
     conf: 0.35
     iou: 0.5
-    imgsz: 256
+    # Must match the finetune resolution (scripts/finetune_yolo.py --imgsz).
+    # See PLAN.md Section 9 pitfall 4.
+    imgsz: 512
     fp16: true
   encoder:
     model_name: "ViT-B-32"
