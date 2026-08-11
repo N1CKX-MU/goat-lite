@@ -32,6 +32,7 @@
    - 3.19 [Evaluation Runner (`src/eval/runner.py`)](#319-evaluation-runner)
 4. [Testing Strategy](#4-testing-strategy)
 5. [Glossary of Key Terms](#5-glossary-of-key-terms)
+6. [Engineering Log](#6-engineering-log) — dated record of problems hit and how they were fixed
 
 ---
 
@@ -1471,3 +1472,613 @@ Our agent only yaws (turns left/right on the ground plane). We extract yaw from 
 
 ### YOLO (You Only Look Once)
 A family of real-time object detection neural networks. "Only look once" means it processes the entire image in a single forward pass (unlike older methods that scanned the image with sliding windows). YOLOv8n is the nano (smallest) variant of version 8.
+
+---
+
+## 6. Engineering Log
+
+A dated, append-only record of problems hit while getting the system running and
+how each was diagnosed and fixed. Newest session at the bottom. The point of
+this section is that each *symptom* is written next to its *cause*, because most
+of these presented as something misleading.
+
+---
+
+### 2026-08-10 — Porting the detector-finetune pipeline to Windows/WSL2
+
+**Context.** Week 9 was blocked on `checkpoints/yolo_goat.pt`: with stock COCO
+YOLOv8n the agent cannot see 30 of the 36 GOAT categories, so dev-eval SR was
+0%. The original plan was to render the training set on a second machine
+(`TRAIN_YOLO.md`). That machine was unavailable, so the pipeline was moved to
+the Windows box, which has the disk and an RTX 3050 (4 GB).
+
+#### 6.1 habitat-sim does not run on Windows
+
+**Symptom.** No `habitat-sim` candidate for `win-64` on conda-forge or
+`aihabitat`.
+
+**Cause.** There is no Windows build. Not a resolver problem.
+
+**Fix.** Run the render pipeline inside WSL2 (Ubuntu 24.04), with data on
+`/mnt/d` so it lands on the D: drive rather than inside the distro's
+`ext4.vhdx` — that file lives on C:, which had only ~43 GB free. Miniforge plus
+`habitat-sim 0.3.3 py3.9 headless` from the `aihabitat` channel.
+
+#### 6.2 No GPU rendering in WSL: "unable to find CUDA device 0"
+
+**Symptom.**
+
+```
+Platform::WindowlessEglApplication::tryCreateContext():
+    unable to find CUDA device 0 among 1 EGL devices in total
+WindowlessContext: Unable to create windowless context
+```
+
+and, once that was worked around, a segfault.
+
+**Cause.** Two independent problems.
+
+1. WSL2 ships **no NVIDIA EGL/GLX driver** — `/usr/lib/wsl/lib` has
+   `libcuda.so` and `libd3d12core.so` but no `libEGL_nvidia.so`. Hardware GL
+   comes from Mesa's **d3d12** gallium driver via `/dev/dxg`, so no EGL device
+   advertises a CUDA id, yet habitat's default `gpu_device_id=0` asks Magnum to
+   find one.
+2. Mesa defaults to the **llvmpipe** software rasteriser, and the EGL platforms
+   habitat tries (`device`, GBM) both fail because WSL has no `/dev/dri`.
+
+**Diagnosis.** `eglinfo -B` showed only the Wayland platform working, renderer
+`llvmpipe`. Forcing `GALLIUM_DRIVER=d3d12` with
+`LD_LIBRARY_PATH=/usr/lib/wsl/lib` gave `D3D12 (Intel(R) UHD Graphics)` —
+hardware, but the wrong GPU. Probing each EGL platform in turn showed
+`surfaceless` works where `device` does not.
+
+**Fix.** Four environment variables plus one code change:
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH
+export GALLIUM_DRIVER=d3d12                      # else llvmpipe (CPU)
+export EGL_PLATFORM=surfaceless                  # device/GBM fail: no /dev/dri
+export MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA    # else the Intel iGPU
+export HABITAT_GPU_DEVICE_ID=-1                  # skip EGL<->CUDA matching
+```
+
+`HabitatEnv` and `make_yolo_dataset.py` read `HABITAT_GPU_DEVICE_ID` (default
+`0`), so native-Linux machines are unaffected.
+
+**Result.** `D3D12 (NVIDIA GeForce RTX 3050 Laptop GPU)`, RGB + semantic at
+512x512, **~128 fps**.
+
+#### 6.3 Every .glb was a 133-byte text file
+
+**Symptom.** `Utility::Json: unexpected v at apartment_1.glb:1:1` followed by
+`Trade::GltfImporter::openData(): invalid JSON`.
+
+**Cause.** `git-lfs` was not installed. habitat's downloader clones from
+HuggingFace, so every `.glb` arrived as an LFS **pointer file** starting
+`version https://git-lfs.github.com/spec/v1` — hence "unexpected v".
+
+**Fix.** `apt-get install git-lfs && git lfs install`, then `git lfs pull`.
+Cheap early check: `ls -l` any `.glb`; 133 bytes means pointer, not mesh.
+
+#### 6.4 numpy 2.x silently breaks habitat-sim
+
+**Symptom.** `AttributeError: _ARRAY_API not found`, then
+`ImportError: numpy.core.multiarray failed to import`, raised from
+`quaternion/__init__.py` during `import habitat_sim`.
+
+**Cause.** Installing torch/ultralytics upgrades numpy to 2.x, and
+habitat-sim's `quaternion` C extension is compiled against numpy 1.x.
+
+**Fix.** Pin `numpy==1.26.4` **after** installing torch, and use the last
+numpy-1.x-compatible builds of the other binary packages:
+`opencv-python-headless==4.10.0.84` and `pillow==10.4.0`. Verify with real array
+interop rather than imports alone — `cv2` imported cleanly while still being
+ABI-incompatible.
+
+Working set: numpy 1.26.4, torch 2.6.0+cu124, ultralytics 8.4.117,
+open_clip_torch 3.3.0, habitat-sim 0.3.3.
+
+#### 6.5 requirements.txt is not installable as written
+
+`numpy==1.24.4` conflicts with habitat-sim, and `ultralytics==8.1.34` calls
+`torch.load()` without `weights_only=False`, which torch >= 2.6 refuses. The
+pins were left in place (they may hold on the original Linux box) and the
+working combination documented in `TRAIN_YOLO.md` Section 0.
+
+**Also missing entirely: `scikit-fmm`.** `src/planning/fmm.py` catches the
+`ImportError` and returns `None`, so the agent silently degrades to the A*
+planner and two planner tests skip. Now added to `requirements.txt`. This
+mattered — the eval would otherwise have run a different planner than the one
+the method section describes.
+
+#### 6.6 A WSL DNS failure that looked like an auth failure
+
+**Symptom.** `curl rc=6` against `api.matterport.com`, immediately after the
+same URL had worked.
+
+**Cause.** WSL's NAT DNS proxy (`nameserver 10.255.255.254`) stopped resolving
+mid-session. `rc=6` is "couldn't resolve host", but in context it read as a
+rejected HM3D token.
+
+**Fix.** `1.1.1.1` in `/etc/resolv.conf`, plus `generateResolvConf = false` in
+`/etc/wsl.conf` so WSL stops regenerating the file.
+
+#### 6.7 An apparent 10 KB/s download of a 40 GB dataset
+
+**Symptom.** HM3D tars downloading at ~10 KB/s — an ETA measured in weeks.
+
+**Cause.** Self-inflicted contention: the CLIP weights fetch (triggered by the
+test suite), a pip install, and an unnecessary `hm3d_example_full` download were
+all running at once. An A/B test with everything else stopped measured
+**4.5 MB/s** on a single connection. aria2 with 16 connections returned 0 bytes
+— its basic-auth handling does not survive the CDN redirect — so plain `curl` is
+the right tool here.
+
+Secondary lesson: an aggressive `--speed-limit 2048 --speed-time 120` made curl
+abort and re-handshake constantly under contention. Relaxed to 1 KB/s over 300 s.
+
+The download uses `curl -C -` for resume rather than habitat's downloader,
+because a 27 GB fetch over wifi will drop and the downloader restarts from zero.
+
+#### 6.8 The big one: semantics never loaded, so every label file was empty
+
+**Symptom.** Exactly the failure `TRAIN_YOLO.md` warns about. Across 75 rendered
+frames: **0 boxes, 0 GOAT instances, 0 distinct categories.** Buried in the log:
+
+```
+SSD Load Failure! File with SemanticAttributes-provided name
+  `.../00800-TEEsavR23oF/TEEsavR23oF.basis.scn` exists but failed to load.
+```
+
+**Cause.** `make_sim()` set `scene_dataset_config_file = "default"`. With
+`"default"` habitat treats the `.basis.glb` as a bare stage and guesses a
+sibling semantic descriptor `<scene>.basis.scn`, which does not exist in HM3D.
+The `.semantic.glb` / `.semantic.txt` pair is therefore never attached,
+`sim.semantic_scene.objects` is empty, and every frame yields no boxes.
+
+HM3D ships `hm3d_annotated_*_basis.scene_dataset_config.json` (in the
+`*-semantic-configs-*` tar) whose stage defaults declare:
+
+```json
+"semantic_descriptor_filename": "%%CONFIG_NAME_AS_ASSET_FILENAME%%.semantic.txt",
+"semantic_asset":               "%%CONFIG_NAME_AS_ASSET_FILENAME%%.semantic.glb",
+"has_semantic_textures": true
+```
+
+**Proof.** Same scene, only `scene_dataset_config_file` changed:
+
+| `scene_dataset_config_file` | semantic objects | distinct categories |
+|---|---|---|
+| `"default"` (old) | 0 | 0 |
+| annotated config (new) | **661** | **129** |
+
+**Fix.** `make_yolo_dataset.py` gained `--scene-dataset-config`, auto-detected
+from `--hm3d-root` by `find_scene_dataset_config()`, and **hard-fails** when no
+config is found. A second guard aborts if the first 5 scenes produce no boxes,
+rather than spending hours writing an empty dataset.
+
+**Result.** 75 frames produced 129 boxes, 52% of frames non-empty, 25/36 GOAT
+classes present in a 3-scene sample.
+
+#### 6.9 Whole categories lost to naming variants
+
+**Symptom.** After the fix, `stairs` appeared 65 times in the *unmapped* list
+while GOAT's `stair` matched only 5 instances. `island` had **zero** direct
+matches and existed only as `kitchen island`.
+
+**Cause.** HM3D-Semantics category strings are free-form annotator text, and
+`name_to_id()` matches exactly.
+
+**Fix.** Added `HM3D_CATEGORY_ALIASES` and `hm3d_name_to_id()` to
+`goat_classes.py`, used *only* when ingesting HM3D annotations. `name_to_id()`
+is unchanged, so the 36 emitted class names and the matcher are untouched.
+
+Curated by hand from a 12-scene census; several automatic suggestions were
+rejected as different objects: `book rack`, `piano stool`, `piano bench`,
+`mirror frame`, `refrigerator cabinet`, `stair wall`, `stair handle`, and
+`glasses` (eyewear, not a glass surface).
+
+**Result.** Same 3 scenes: 129 -> **175 boxes** (+36%); non-empty frames
+52% -> 59%.
+
+#### 6.10 Training validated before the data existed
+
+To avoid discovering a training-time problem after hours of rendering, the
+trainer was exercised on a synthetic 36-class dataset:
+
+- `scripts/finetune_yolo.py` runs end to end and exports a checkpoint whose
+  `model.names` equals `GOAT_CATEGORIES` exactly (TRAIN_YOLO.md step 5).
+- **Peak VRAM at `--batch 24 --imgsz 512`: 2247 MiB of 4096.** Batch 24-32 is
+  safe on the 4 GB card; the documented `--batch 16` is conservative.
+
+#### 6.11 imgsz mismatch between training and inference
+
+`TRAIN_YOLO.md` specifies `--imgsz 512` while `detector.py` and
+`agent_default.yaml` both inferred at 256 — precisely the pitfall in PLAN.md
+Section 9.4. Resolved to 512 on both sides.
+
+Still open: `HabitatEnv` renders the agent camera at 256x256, so at eval time a
+256 render is upscaled to 512 for the detector, while training images are
+rendered at 512 natively. This is a mild sharpness domain gap. The alternative
+is raising the agent camera to 512 (slower sim, more VRAM). Flagged, not yet
+decided.
+
+#### 6.12 GOAT-Bench episodes: sourcing and verification
+
+The eval needs per-scene shards at
+`data/datasets/goat_bench/hm3d/v1/val_unseen/content/*.json.gz`. These are not
+part of HM3D; they come from the GOAT-Bench repo (`Ram81/goat-bench`), hosted on
+Google Drive as a 68 MB zip and publicly downloadable via `gdown`.
+
+Loader verification against the published paper numbers:
+
+| quantity | loaded | paper |
+|---|---|---|
+| episodes | 360 | 360 |
+| subtasks | 2669 | 2669 |
+| scenes | 36 | 36 |
+
+Modality split: 991 category / 856 language / 822 image. The 30-episode dev
+subset is deterministic across runs at seed 42.
+
+#### 6.13 Category subtasks were hard-coded to failure (37% of the benchmark)
+
+**Symptom.** Only 1678 of 2669 subtasks had `goal_info`. The 991 without it were
+*exactly* the category-modality subtasks.
+
+**Cause.** GOAT-Bench writes a category task as `['freezer', 'object', None]` —
+there is deliberately no `object_id`, because **any** instance of the category
+counts as success. The loader only built a `GoalInfo` when `goal_key` was not
+None, so every category subtask got `goal_info=None`. `runner.py` then hit:
+
+```python
+else:
+    # No goal info — can't evaluate properly
+    success = False
+```
+
+So every category subtask was scored as a failure regardless of what the agent
+did. Overall SR was capped at 63%, and **SR for the category modality was
+structurally pinned at 0%** — one of the two primary modalities in PLAN.md.
+
+This is worth emphasising because it would have been extremely easy to
+misattribute during Week 9 debugging: the detector was already suspected, so a
+category SR of 0 would have looked like more evidence for that, and no amount of
+detector improvement would ever have moved it.
+
+**Fix.** `SubtaskSpec` gained `goal_candidates: list[GoalInfo]` — the set of
+instances that count as reaching the goal:
+
+- language / image -> the one referenced instance (unchanged behaviour)
+- category -> every annotated instance of that category in the scene
+
+`runner.py` now scores against that list: SPL uses the geodesic distance to the
+nearest instance, and success uses the closest one. `goal_info` is retained for
+the language description and image goals.
+
+**Result.** Scoreable subtasks 1678 -> **2669 (all of them)**. Regression tests
+in `tests/test_goat_dataset.py` cover both directions: category subtasks must
+expose candidates, and language/image subtasks must *not* widen to every
+instance of their category.
+
+#### 6.14 Split separation, to make val leakage structurally impossible
+
+Both HM3D tars extract **flat**: val as `00800-<hash>/`, train as `000NN-<hash>/`.
+Dropped into one directory they are indistinguishable to `find_scenes()`, which
+simply walks the tree — so the detector would have been trained on val_unseen
+scenes and every reported number would have been invalid. Nothing would have
+errored; the SR would just have been quietly optimistic.
+
+Extraction therefore routes by split into separate roots:
+
+```
+/mnt/d/goat-data/hm3d_train   <- detector training only  (145 annotated scenes)
+/mnt/d/goat-data/hm3d_val     <- evaluation only         (36 annotated scenes)
+```
+
+`extract_split.sh` asserts the two roots share no scene id. Physical separation
+beats a filter, because a filter can be forgotten at the next call site.
+
+Related disk note: `hm3d-train-habitat-v0.2.tar` holds all 800 train scenes
+(~27 GB), but HM3D-Semantics annotates only **145**, and a scene without
+`.semantic.glb` can never yield a label. `extract_train_basis.sh` therefore
+extracts only the 145 annotated scene dirs, saving roughly 22 GB.
+
+#### 6.15 Eval preflight (checks worth repeating before any long run)
+
+With the val split and episodes in place, the following were verified before
+committing to a 30-episode run:
+
+- **Scene resolution.** All 36 distinct `scene_id`s resolve to files that exist
+  via `_resolve_scene_path`. 10 episodes per scene, 360 total.
+- **Navmesh loads.** `pathfinder.is_loaded` is True, 75.4 m² navigable on the
+  first scene, and a sample geodesic returns a finite 4.77 m. Without this,
+  `_geodesic_distance` returns `inf` and every SPL is silently 0.
+- **Episode start poses are navigable.**
+- **Depth is in metres** (PLAN.md Section 9 pitfall 2). Random navigable poses
+  give medians of 0.5-2.2 m and maxima to 6.2 m.
+
+Two observations that look alarming but are not bugs:
+
+1. `env.reset()` leaves the agent at an unset default pose, which on the first
+   val scene sits ~0.24 m from geometry — depth then spans a 7 mm range and
+   looks like a units error. The eval never uses that pose; `run_episode` sets
+   the episode start pose explicitly. Only the *pose* is degenerate.
+2. At a genuine episode start pose, **~70% of depth pixels are zero**. Habitat
+   returns 0 where there is no geometry, and HM3D scans have open doorways and
+   holes. Normal, but it means occupancy updates are sparser than the raw pixel
+   count suggests — worth remembering if the map looks thin while debugging.
+
+**Full test suite is green for the first time: 139 passed, 0 skipped.** The 7
+`test_agent_smoke` tests had been skipping for want of HM3D scenes, so
+`HabitatEnv`, `YOLODetector` and `ClipEncoder` had never actually been exercised
+against a real scene in this environment. The repo's expected paths are provided
+by gitignored symlinks:
+
+```
+data/hm3d                        -> hm3d_val    (eval root, 36 scenes)
+data/hm3d_train                  -> hm3d_train  (145 scenes)
+data/datasets/goat_bench/hm3d/v1 -> GOAT-Bench episodes
+```
+
+#### 6.16 The agent spawned upside down in every episode
+
+This is the big one, and it had nothing to do with the detector.
+
+**Symptom.** A 1-episode dry run finished all 10 subtasks but with
+`path_length = 0.00 m` on every one, including two that ran the full 500 steps.
+`distance_to_goal` repeated exactly per category (mirror 4.06 three times,
+dresser 4.31 four times), i.e. the agent's final pose was identical every time.
+Eight subtasks ended `no_plan` after exactly **12** steps -- and 360/30 = 12,
+one full turn-in-place scan.
+
+**Ruling things out.** Direct actuation was fine: 10 `move_forward` steps moved
+the agent 2.495 m, `get_gps()` tracked it exactly, all 8 headings produced
+motion, navmesh loaded, start pose navigable. So the environment worked and the
+*agent* was never emitting forward.
+
+Instrumenting the FSM showed why: after 12 steps the occupancy map was still
+completely empty -- `explored=0, free=0, occupied=0, unknown=230400`. No map, so
+no frontiers, so no plan, so spin 12 times and stop.
+
+`update_from_depth()` *was* being called every step. Tracing it stage by stage:
+
+```
+world Y: min=-6.939  median=-0.536  p95=-0.536  max=-0.536
+agent y = -0.536
+```
+
+Every projected point landed at or below camera height -- maximum exactly equal
+to it -- so the height band `[floor+0.1, floor+1.5]` kept **0 of 16384 points**
+at any floor value. And 100% of valid depth pixels were in the bottom half of
+the image: the camera was staring at the floor.
+
+**Cause.** `runner.py` did:
+
+```python
+state.rotation = qt.from_float_array(episode.start_rotation)
+```
+
+habitat's episode JSON stores rotations as **(x, y, z, w)**. numpy-quaternion's
+`from_float_array` reads **(w, x, y, z)**. For a typical yaw-only start pose the
+misread turns the rotation into a ~180 degree roll:
+
+| | current | fixed |
+|---|---|---|
+| rotation angle | **180.0 deg** | 3.7 deg |
+| agent "up" vector | **[0, -1, 0]** | [0, 1, 0] |
+| episodes upside down | **360 / 360** | **0 / 360** |
+
+**Why it hid so well.** The *forward* vector is identical under both readings
+(`[0.065, 0, -0.998]`). The agent walks in the correct direction, so actuation
+tests, navmesh checks and `test_step_forward_changes_position` all pass. Only
+the roll is wrong -- the camera is upside down. This is PLAN.md Section 9
+pitfall 1 ("every bug in mapping traces back to coordinate frames") in its most
+literal form, and it is why the earlier `path_to_action` heading fix looked
+correct in isolation yet the eval still produced nothing.
+
+**Fix.** `quaternion_from_coeffs()` in `goat_dataset.py`, documenting the (x, y,
+z, w) order, used by `runner.py`. `EpisodeSpec.start_rotation`'s docstring now
+states the order and warns against `from_float_array`.
+
+**Result** on the same episode and step budget:
+
+| | before | after |
+|---|---|---|
+| explored cells after 12 steps | 0 | 15218 |
+| frontiers found | 0 | 12 |
+| agent moves | no | yes |
+
+Regression tests in `tests/test_goat_dataset.py` assert the fixed reading keeps
+"up" up **and** that `from_float_array` on the same coefficients flips it -- the
+failure mode itself is pinned, not just the happy path.
+
+#### 6.17 Camera pose vs agent pose: the map was built from the ceiling
+
+With the upside-down spawn fixed the agent moved, but only briefly, then stalled
+with `explored` frozen. The map was badly wrong in a second way.
+
+**Symptom.** Occupancy composition was inverted: **25829 occupied cells vs 8705
+free** in a scene with only 75.4 m^2 (~30000 cells) of navigable area. A* then
+had nowhere to path, so 38 detected frontiers were all unreachable.
+
+**Cause.** `HabitatEnv.get_pose()` returned the **agent base** pose, but that
+pose is used to back-project depth, and depth is measured from the **camera**,
+mounted 1.41 m higher:
+
+```
+agent_y (floor)      = -0.536
+pose translation y   = -0.536   <-- base, not camera
+camera y should be   =  0.874
+```
+
+Every mapped point therefore sat 1.41 m too low. Combined with the second
+problem -- `floor_height` defaulting to **0.0** while HM3D floors sit at
+arbitrary world Y (-0.536 here) -- the height band `[floor+0.1, floor+1.5]`
+ended up sampling roughly 1.5-2.9 m above the real floor: **the ceiling**. A
+ceiling projects onto the entire floor plan, so nearly every cell read as an
+obstacle.
+
+**Fix.**
+1. `get_pose()` now returns the sensor pose, preferring habitat's own
+   `state.sensor_states["rgb"]` and falling back to the mount offset. It also
+   feeds `bbox_center_depth_to_world_xyz`, so instance positions were wrong by
+   the same 1.41 m.
+2. `SemanticMap` gained an optional `camera_height`; when set, the floor is
+   derived per update as `pose[1,3] - camera_height` instead of a fixed
+   absolute `floor_height`. `build_agent()` passes 1.41. Existing callers that
+   rely on the absolute band are unaffected.
+3. Added `HabitatEnv.get_floor_height()`.
+
+**Result** (single frame, then 16 agent steps):
+
+| | before | after |
+|---|---|---|
+| occupied vs free | 25829 / 8705 | 7112 / 4706 |
+| agent moves | no | yes |
+| frontiers | 38 unreachable | 26, 24 reachable |
+| detections mapped | 0 | 9 |
+
+#### 6.18 What was NOT broken
+
+Worth recording, because each was suspected and cleared with a direct
+measurement rather than by reading code:
+
+- **`path_to_action` heading convention** (fixed earlier in 2f7693d) is
+  correct. Predicted forward `(-sin h, -cos h)` matched the simulator's actual
+  forward on **12/12** headings; `turn_left` = +30 deg, `turn_right` = -30 deg
+  as assumed; and a closed-loop drive to a point 2.00 m away finished 0.22 m
+  off.
+- **A\*** works: 111 waypoints to the chosen frontier, 24/26 frontiers
+  reachable once the map was sane.
+- **Actuation and navmesh**: 10 forward steps = 2.495 m, `get_gps()` tracks it,
+  motion in all 8 headings, navmesh loaded, start poses navigable.
+- **Depth units** are metres.
+
+The lesson for the report: three separate defects (upside-down spawn, camera-vs-
+base pose, absolute floor height) all presented as the single symptom "agent
+does not move and SR is 0", and the two components most suspected -- the
+detector and the heading convention -- were innocent.
+
+#### 6.19 curl `--retry` silently discarded 13 GB
+
+**Symptom.** `hm3d-train-habitat-v0.2.tar` reached 15 GB, then later showed
+**2.0 GB** and a progress bar at 8%.
+
+**Cause.** `curl -C - --retry 1000` computes the resume offset **once**, when
+the transfer starts. A retry firing mid-transfer reopened the output file and
+restarted from byte 0, truncating the partial download. The `--retry` and
+`-C -` flags do not compose the way the flag names suggest.
+
+**Fix.** Drop curl's internal `--retry` and drive retries from an outer shell
+loop, so every attempt is a fresh `curl -C -` that re-reads the on-disk size.
+The loop also warns if the file ever shrinks (a server ignoring `Range`).
+
+Second gotcha in the same fix: the Matterport CDN does not return
+`Content-Length` on a `HEAD` through its redirect, so completion cannot be
+detected by comparing sizes. Completion is now taken from curl's exit status
+(0 = finished; 22 with no new bytes = 416 Range Not Satisfiable = already
+complete), with a `Range: bytes=0-0` probe reading the total from
+`Content-Range` where available.
+
+#### 6.20 Detector results (`checkpoints/yolo_goat.pt`)
+
+Rendered dataset: **5971 images / 23177 boxes** from all **145/145** annotated
+HM3D train scenes (5352 train + 619 val over 14 held-out scenes). No val_unseen
+scene appears anywhere in it.
+
+Trained YOLOv8n, imgsz 512, batch 24. Peak VRAM 2.2 GB of 4 GB. Two practical
+notes: ultralytics reported `Slow image access (11.3 MB/s)` while the dataset
+sat on `/mnt/d`, so it was copied to WSL's ext4 (2809 MB/s) -- training was
+otherwise I/O-bound, not GPU-bound. And `Remapped 4/36 cls head rows from
+pretrained weights by class name`, so four categories inherit COCO
+initialisations.
+
+Training reached **epoch 39 of 60** before the process was killed (the laptop
+slept; the `time` column jumps from 2940 s at epoch 33 to 30053 s at epoch 34).
+Weights had already been written and stripped, so `best.pt` is intact.
+**Caveat for the report:** the LR schedule was set for 60 epochs and never
+annealed, so these numbers understate what a completed run would give.
+
+**Overall: mAP50 = 0.149, mAP50-95 = 0.099.** Best epoch 38.
+
+Aggregate mAP over 36 heavily imbalanced classes is the wrong lens for
+navigation -- what matters is recall on categories that actually appear as
+goals. Per class, performance tracks training-box count almost monotonically:
+
+| class | train boxes | R | mAP50 |
+|---|---|---|---|
+| picture | 4171 | 0.53 | 0.51 |
+| pillow | 4653 | 0.47 | 0.34 |
+| microwave | 268 | 0.53 | 0.57 |
+| refrigerator | 404 | 0.50 | 0.32 |
+| mirror | 1188 | 0.35 | 0.35 |
+| plant | 981 | 0.33 | 0.15 |
+| nightstand | 202 | 0.31 | 0.42 |
+| book | 1624 | 0.17 | 0.19 |
+| ... | | | |
+| piano / statue / boiler / calendar / footrest | 40-62 | **0.00** | <0.05 |
+| christmas tree | 0 | 0.00 | 0.00 |
+
+**Only 7 of 36 classes reach recall >= 0.30.** Twelve have zero recall; those
+rows typically show `P=1.000, R=0.000`, i.e. the model emits a single confident
+box and misses everything else -- classic long-tail collapse. Four classes
+(`hanging clothes`, `exercise bike`, `freezer`, `shower glass`) have no val
+instances at all, so they cannot even be measured.
+
+This is a **data-availability** ceiling in HM3D-Semantics, not a modelling
+failure, and the report should say so explicitly. Anything built on top of this
+detector will do well on `picture`/`pillow`/`mirror`/`refrigerator` subtasks and
+poorly on the tail, independent of the navigation policy.
+
+#### 6.21 Remaining blocker: the occupancy map disagrees with the navmesh
+
+With the finetuned detector installed, a 2-episode smoke test still gave
+**SR = 0%**, but the failure is now clearly in mapping, not perception.
+
+Action histograms per subtask:
+
+```
+subtask 0  {fwd: 77, left: 23, right: 20}   moved 1.07 m
+subtask 1  {fwd: 87, left: 17, right: 16}   moved 0.01 m
+subtask 2  {left: 120}                      moved 0.00 m   APPROACHING<->SEARCHING
+```
+
+The agent commands forward constantly and does not move. Measured directly:
+
+| measurement | value |
+|---|---|
+| forward actions blocked (no motion) | **31 / 49** |
+| habitat-reported collisions | 0 |
+| map says FREE and navmesh agrees navigable | **37%** |
+| map says OCCUPIED yet navmesh says navigable | **45%** |
+
+So the occupancy grid is close to uncorrelated with real navigability: it
+invents free space to plan through and invents obstacles that block valid
+routes. A* then returns paths into walls, the agent grinds against geometry,
+and later subtasks spin because everything nearby reads as blocked.
+
+**Likely dominant cause.** `update_from_depth` is a one-shot, irreversible
+write: `self._occupancy[rows, cols] = 1` marks a cell occupied forever from a
+*single* depth sample, and ray-clearing only writes free where a cell is not
+already occupied. There is no evidence accumulation and no way to undo a
+mistake, so projection error, depth noise and distant geometry (`max_depth` is
+10 m) monotonically fill the grid with obstacles over hundreds of steps. The map
+can only get worse the longer an episode runs, which matches subtasks 2+ being
+worse than subtask 0.
+
+**Proposed fix** (not yet applied -- this is a design change to a core module,
+so per PLAN.md Section 10.7 it should be a conscious decision rather than
+drift): replace the binary write with count-based or log-odds evidence --
+require k hits before a cell counts as occupied, let ray-clearing supply
+negative evidence, and threshold for the planner. Optionally reduce `max_depth`
+for mapping, since far depth samples carry the largest projection error.
+
+#### Categories at risk (for the report's error analysis)
+
+From a 12-scene val census, these GOAT categories had **zero** instances even
+after aliasing: `exercise bike`, `photo mount`, `shower glass`. Several more are
+very rare — `boiler`, `calendar`, `christmas tree`, `footrest`, `freezer` and
+`photo` had one instance each. Expect poor detector recall on these and say so
+explicitly in the write-up, rather than letting it read as a general failure.
+Per-category counts are saved to `logs/category_census.json`.
