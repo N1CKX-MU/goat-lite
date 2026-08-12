@@ -36,8 +36,16 @@ def depth_to_pointcloud_camera(
         max_depth: ignore pixels above this depth.
 
     Returns:
-        [H*W, 3] point cloud in camera frame (X-right, Y-down, Z-forward).
+        [H*W, 3] point cloud in the habitat/OpenGL camera frame
+        (X-right, Y-UP, Z-BACKWARD, i.e. the camera looks down -Z).
         Invalid points have (0, 0, 0).
+
+    The axes must match the rotation this cloud is later multiplied by, which
+    comes from the habitat agent/sensor quaternion and is OpenGL-convention.
+    Building OpenCV-style points (Y down, Z = +depth) and applying an OpenGL
+    rotation mirrors the cloud through the camera: measured on a val frame,
+    0% of reconstructed points landed in front of the agent instead of 100%,
+    which displaced every occupancy cell and every memory node by metres.
     """
     h, w = depth.shape
     fx, fy = K[0, 0], K[1, 1]
@@ -48,12 +56,11 @@ def depth_to_pointcloud_camera(
     v = np.arange(h, dtype=np.float32)
     u, v = np.meshgrid(u, v)
 
-    # Back-project: Habitat uses OpenGL camera convention
-    # In OpenGL: X-right, Y-up, Z-out (negative Z is forward)
-    # But depth is positive distance along optical axis
-    z = depth
-    x = (u - cx) * z / fx
-    y = (v - cy) * z / fy
+    # Image v grows downward but camera Y grows up, hence the negation; the
+    # camera looks along -Z, hence z = -depth.
+    x = (u - cx) * depth / fx
+    y = -(v - cy) * depth / fy
+    z = -depth
 
     # Stack and reshape
     pc = np.stack([x, y, z], axis=-1).reshape(-1, 3)
@@ -122,12 +129,14 @@ def bbox_center_depth_to_world_xyz(
 
     d = float(np.median(valid))
 
-    # Back-project single pixel
+    # Back-project single pixel, habitat/OpenGL camera axes (Y up, -Z forward).
+    # Must match depth_to_pointcloud_camera and the OpenGL-convention rotation
+    # applied below, or the instance lands mirrored behind the camera.
     fx, fy = K[0, 0], K[1, 1]
     ox, oy = K[0, 2], K[1, 2]
     x_cam = (cx_px - ox) * d / fx
-    y_cam = (cy_px - oy) * d / fy
-    z_cam = d
+    y_cam = -(cy_px - oy) * d / fy
+    z_cam = -d
 
     pt_cam = np.array([[x_cam, y_cam, z_cam]])
     pt_world = pointcloud_camera_to_world(pt_cam, pose)

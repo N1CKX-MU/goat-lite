@@ -191,9 +191,11 @@ class TestPerceptionPipeline:
         result = pipe.process(obs, step=0)
         assert len(result) == 1
         xyz = result[0].world_xyz
-        # Center pixel with identity pose: x_cam ~ 0, y_cam ~ 0, z_cam = 5
-        # So world coords should be close to (0, 0, 5)
-        assert abs(xyz[2] - 5.0) < 0.5  # z ~ depth
+        # Center pixel with identity pose: x_cam ~ 0, y_cam ~ 0, z_cam = -5.
+        # Habitat cameras look along -Z, so an object 5 m ahead is at z = -5.
+        # Previously asserted +5, matching the old OpenCV-style back-projection
+        # that mirrored points behind the camera once the pose was applied.
+        assert abs(xyz[2] - (-5.0)) < 0.5  # z ~ -depth
 
     def test_bbox_clipped_to_image(self):
         """Bbox that extends beyond image should be clipped."""

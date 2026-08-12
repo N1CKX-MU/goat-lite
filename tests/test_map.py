@@ -34,18 +34,22 @@ class TestMakeIntrinsics:
 
 class TestDepthToPointcloud:
     def test_center_pixel_points_forward(self):
-        """Center pixel at 1m depth should be at (0, 0, 1) in camera frame
-        (camera looks along +Z in OpenGL/Habitat convention with flipped axes)."""
+        """Center pixel at 1 m depth sits at (0, 0, -1) in the camera frame.
+
+        Habitat/OpenGL cameras look along **-Z**, so forward is negative. This
+        test previously asserted z = +1 (OpenCV convention), which matched the
+        old back-projection but not the rotation applied to it -- the mismatch
+        mirrored every reconstructed point behind the camera.
+        """
         K = make_intrinsics(90.0, 256, 256)
         depth = np.zeros((256, 256), dtype=np.float32)
         depth[128, 128] = 1.0  # 1 meter at center pixel
         pc = depth_to_pointcloud_camera(depth, K)
-        # Should have exactly one valid point (others are zero depth)
-        valid = pc[pc[:, 2] > 0]
+        # Valid points now lie at negative Z (in front of the camera).
+        valid = pc[pc[:, 2] < 0]
         assert len(valid) >= 1
-        # Center pixel -> roughly (0, 0, 1) in camera frame
         pt = valid[0]
-        assert np.isclose(pt[2], 1.0, atol=0.05)
+        assert np.isclose(pt[2], -1.0, atol=0.05)
         assert abs(pt[0]) < 0.05
         assert abs(pt[1]) < 0.05
 
@@ -102,7 +106,10 @@ class TestBboxCenterDepthToWorld:
         bbox = (64, 64, 192, 192)  # center at (128, 128)
         xyz = bbox_center_depth_to_world_xyz(bbox, depth_map, K, pose)
         assert xyz is not None
-        assert np.isclose(xyz[2], 2.0, atol=0.1)
+        # Camera looks along -Z, so an object 2 m ahead is at z = -2 under an
+        # identity pose. Was asserted as +2 against the old OpenCV-style
+        # back-projection.
+        assert np.isclose(xyz[2], -2.0, atol=0.1)
 
     def test_returns_none_for_zero_depth(self):
         K = make_intrinsics(90.0, 256, 256)
