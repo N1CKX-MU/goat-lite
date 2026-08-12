@@ -33,7 +33,13 @@ class YOLODetector:
         weights: str | None = None,
         device: str = "cuda",
         fp16: bool = True,
-        conf: float = 0.35,
+        # The finetuned GOAT detector is recall-limited (mAP50 0.149), so a high
+        # confidence gate blinds the agent: measured over 40 val frames, conf
+        # 0.35 produced detections in only 20% of them, leaving instance memory
+        # empty and the matcher with nothing to match. 0.15 raises that to 50%.
+        # False positives are cheaper here than misses -- the agent's VERIFYING
+        # state re-checks a candidate before declaring success.
+        conf: float = 0.15,
         iou: float = 0.5,
         # Matches the finetune resolution of yolo_goat.pt; training and
         # inference resolutions must agree (PLAN.md Section 9, pitfall 4).

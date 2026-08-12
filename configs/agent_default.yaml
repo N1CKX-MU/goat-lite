@@ -7,7 +7,10 @@ perception:
   detector:
     # Finetuned GOAT-vocabulary weights; detector falls back to yolov8n.pt if absent.
     weights: "checkpoints/yolo_goat.pt"
-    conf: 0.35
+    # Kept in sync with YOLODetector's default. NOTE: build_agent() in
+    # scripts/run_dev_eval.py does not currently read this file, so the code
+    # default is what actually takes effect at eval time.
+    conf: 0.15
     iou: 0.5
     # Must match the finetune resolution (scripts/finetune_yolo.py --imgsz).
     # See PLAN.md Section 9 pitfall 4.
