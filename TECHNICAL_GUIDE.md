@@ -2074,6 +2074,118 @@ require k hits before a cell counts as occupied, let ray-clearing supply
 negative evidence, and threshold for the planner. Optionally reduce `max_depth`
 for mapping, since far depth samples carry the largest projection error.
 
+### 2026-08-12 — Five fixes between "agent cannot move" and "agent cannot succeed"
+
+The detector existed by now (`checkpoints/yolo_goat.pt`, mAP50 0.149) but the
+2-episode smoke test still gave SR 0%. Five defects were found and fixed, each
+at a different stage of the pipeline. **SR is still 0% at the end of the day** --
+what changed is that the failure mode moved forward through the stack each time,
+and the geometry is now provably correct.
+
+#### 6.22 Occupancy was one-shot and irreversible
+
+`update_from_depth` set `occupancy[r, c] = 1` from a SINGLE depth pixel and
+never revised it, and ray-clearing was gated on "only if not already occupied".
+Every projection error was permanent, so the grid filled with phantom obstacles
+and A* ran out of routes. Against the navmesh: 37% of "free" cells were
+navigable, 45% of "occupied" cells were. 31 of 49 forward commands were
+physically blocked.
+
+Replaced with (a) `min_points_per_cell=3` -- a real surface fills a 5 cm cell
+with many pixels, a stray sample contributes one -- and (b) clamped log-odds so
+free evidence can outvote a stale obstacle. The clamp is what makes recovery
+possible at all.
+
+Result: blocked forwards 63% -> 0%, occupied cells 12057 -> 640, `no_plan`
+subtasks 10/17 -> 0, median path travelled 0.00 m -> 12.39 m.
+
+#### 6.23 The detector confidence gate blinded the agent
+
+`conf=0.35` on a recall-limited detector. Over 40 val frames: conf 0.35 gave
+detections in 20% of frames, 0.25 -> 30%, 0.15 -> 50%, 0.10 -> 65%. The agent
+saw nothing in four frames out of five, so instance memory stayed empty and the
+matcher had nothing to match. Lowered to 0.15; misses cost more than false
+alarms because VERIFYING re-checks candidates.
+
+Note found while doing this: **`build_agent()` never reads
+`configs/agent_default.yaml`.** The code defaults are what run at eval time.
+
+#### 6.24 The matcher chased the most confident instance, not the nearest
+
+For category and image goals any instance of the category counts, but
+`_match_category` returned `max(candidates, key=confidence)`. The agent walked
+past the object it was standing beside -- 0.98 m away, inside the success
+radius -- to chase a better-scored one across the scene. `match()` now takes the
+agent's XZ and selects on distance.
+
+Final distance to goal, same episode: language/dresser 4.33 -> 0.60 m, another
+language/dresser 6.51 -> 0.87 m.
+
+#### 6.25 Language goals could never be verified
+
+`_goal_in_view` compared a detection's `cls_name` against `goal.value`. For a
+language goal that value is the whole description ("bathroom mirror. start by
+locating the sink..."), which never equals a class name. VERIFYING therefore
+always failed, the FSM bounced back to APPROACHING and looped to timeout **while
+standing on the target**. That is 856 of 2669 val_unseen subtasks (32%)
+structurally unable to succeed. Now compares against the matched instance's
+class.
+
+#### 6.26 Depth back-projection used the wrong camera convention
+
+The big one. `depth_to_pointcloud_camera` and `bbox_center_depth_to_world_xyz`
+built OpenCV points (Y down, Z = +depth), but the rotation applied to them comes
+from the habitat sensor quaternion, which is OpenGL (Y up, camera looks down
+-Z). Mixing them mirrors the cloud through the camera.
+
+Measured with the agent upright, fraction of reconstructed points landing in
+front of the agent along its heading:
+
+| convention | in front |
+|---|---|
+| OpenCV (Y down, Z = +d) -- what the code did | **0.0%** |
+| OpenGL (Y up, Z = -d) -- habitat's actual | **100.0%** |
+
+Every occupancy cell and every memory node was displaced. Instance nodes for a
+goal category sat ~3 m from the true object, which is why the agent could stand
+0.60 m from a dresser, believe its target was metres away, and never enter
+VERIFYING.
+
+Map quality across the day's three mapping fixes -- cells the map calls occupied
+that are actually navigable per the navmesh:
+
+| | |
+|---|---|
+| original | 45% |
+| after the occupancy rewrite (6.22) | 26% |
+| after the convention fix | **0%** |
+
+Three tests asserted `z = +depth` and had been encoding the bug; they now assert
+`z = -depth`. Worth remembering that a green suite only pins whatever convention
+the tests were written against.
+
+#### 6.27 Open: navigation regressed after the geometry was corrected
+
+Honest status. With the mirrored map, obstacles were placed *behind* the agent,
+so the space ahead read as free and the agent wandered unobstructed by accident.
+With geometry correct, obstacles sit where they really are and blocked forwards
+rose 0% -> 41%, with 4 subtasks back to `no_plan`.
+
+Ruled out so far:
+- height band is healthy (floor near 0.0, walls to +3.09 above floor, 37-68%
+  of each frame in-band)
+- A* already inflates 4 cells (0.20 m) against a 0.17 m agent radius
+- obstacles are correct (0% of occupied cells navigable)
+
+Still suspect, in order: the occupancy log-odds parameters were tuned against
+the *mirrored* map and likely need retuning now that geometry is right; and
+`_follow_path` uses a 3-cell (0.15 m) lookahead against a 0.25 m step, so the
+agent may overshoot waypoints and drift into walls. Neither is measured yet.
+
+Also unresolved: `map says FREE` agreement is only 42.8%, i.e. the map is
+over-generous about free space near walls, which is consistent with the
+overshoot theory.
+
 #### Categories at risk (for the report's error analysis)
 
 From a 12-scene val census, these GOAT categories had **zero** instances even
