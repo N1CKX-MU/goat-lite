@@ -22,27 +22,48 @@ class GoalMatcher:
         self._use_template = use_template
 
     def match(
-        self, goal: GoalSpec, db: InstanceDatabase
+        self, goal: GoalSpec, db: InstanceDatabase, agent_xy: np.ndarray | None = None
     ) -> tuple[InstanceNode | None, float]:
+        """Best instance in memory for this goal.
+
+        ``agent_xy`` is the agent's world XZ. It only affects category/image
+        goals, where any instance of the category satisfies the task and the
+        nearest one is therefore the right target.
+        """
         if goal.modality == "category":
-            return self._match_category(goal, db)
+            return self._match_category(goal, db, agent_xy)
         elif goal.modality == "language":
             return self._match_language(goal, db)
         elif goal.modality == "image":
             # Image goals carry the target category in `value`; with the
             # finetuned detector we localize the goal by that category.
-            return self._match_category(goal, db)
+            return self._match_category(goal, db, agent_xy)
         else:
             return None, 0.0
 
     def _match_category(
-        self, goal: GoalSpec, db: InstanceDatabase
+        self,
+        goal: GoalSpec,
+        db: InstanceDatabase,
+        agent_xy: np.ndarray | None = None,
     ) -> tuple[InstanceNode | None, float]:
         candidates = db.query_by_class_name(goal.value)
         if not candidates:
             return None, 0.0
-        # Return highest confidence node
-        best = max(candidates, key=lambda n: n.confidence)
+        if agent_xy is None:
+            # No pose available (e.g. unit tests): fall back to confidence.
+            best = max(candidates, key=lambda n: n.confidence)
+            return best, best.confidence
+        # Any instance of the category counts as success, so go to the CLOSEST
+        # one. Picking the most confident instead made the agent walk past the
+        # object it was standing next to (ending 0.98 m away, inside the success
+        # radius) to chase a better-scored one across the scene, and time out.
+        best = min(
+            candidates,
+            key=lambda n: float(
+                np.linalg.norm(np.asarray(n.world_xyz)[[0, 2]] - agent_xy)
+            ),
+        )
         return best, best.confidence
 
     def _match_language(

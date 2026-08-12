@@ -102,7 +102,11 @@ class GoatAgent:
 
         # 2. Goal matching
         self._current_goal = obs.current_goal
-        matched_node, score = self.matcher.match(self._current_goal, self.memory)
+        # Pass the agent's position so category/image goals resolve to the
+        # nearest qualifying instance rather than the most confident one.
+        matched_node, score = self.matcher.match(
+            self._current_goal, self.memory, self._agent_xy(obs)
+        )
 
         # 3. State transitions
         if self.state == AgentState.SEARCHING:
@@ -240,11 +244,22 @@ class GoatAgent:
         return np.array([obs.gps[0], obs.gps[1]], dtype=np.float64)
 
     def _goal_in_view(self, detections) -> bool:
-        """Check if any detection matches the current goal class."""
+        """Is the goal object currently visible?
+
+        Compares against the matched instance's class rather than
+        ``goal.value``. For a language goal ``value`` is the whole description
+        ("bathroom mirror. start by locating the sink..."), which never equals a
+        detection's ``cls_name`` -- so verification could never succeed, the FSM
+        bounced between VERIFYING and APPROACHING forever, and every language
+        subtask timed out even while standing on top of the target.
+        """
         if not detections or self._current_goal is None:
             return False
-        goal_val = self._current_goal.value
+        if self._matched_node is not None:
+            target = self._matched_node.cls_name
+        else:
+            target = self._current_goal.value
         for d in detections:
-            if hasattr(d, 'cls_name') and d.cls_name == goal_val:
+            if hasattr(d, 'cls_name') and d.cls_name == target:
                 return True
         return False

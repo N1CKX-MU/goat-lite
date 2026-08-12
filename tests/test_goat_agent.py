@@ -67,7 +67,7 @@ class FakeMatcher:
     """Returns configurable match results."""
     def __init__(self, result=None):
         self.result = result or (None, 0.0)
-    def match(self, goal, db):
+    def match(self, goal, db, agent_xy=None):
         return self.result
 
 
