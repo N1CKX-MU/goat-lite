@@ -26,6 +26,12 @@ class SemanticMap:
         min_height: float = 0.1,
         max_height: float = 1.5,
         camera_height: float | None = None,
+        min_points_per_cell: int = 3,
+        l_occ: int = 3,
+        l_free: int = 1,
+        clamp: int = 12,
+        occ_threshold: int = 3,
+        free_threshold: int = -2,
     ):
         self._size_m = size_m
         self._resolution = resolution_m
@@ -56,6 +62,31 @@ class SemanticMap:
         )
         # Out-of-vocabulary class ids seen in update_from_detections().
         self._dropped_cls_ids: set[int] = set()
+
+        # Evidence grid behind _occupancy. The old code did
+        # ``_occupancy[r, c] = 1`` from a SINGLE depth pixel and never undid it,
+        # while ray-clearing refused to touch anything already marked occupied.
+        # Every projection error was therefore permanent, the grid filled with
+        # phantom obstacles over an episode, and A* ran out of routes: measured
+        # against the navmesh, only 37% of cells the map called free were
+        # actually navigable and 45% of cells it called occupied were.
+        #
+        # Two mechanisms replace that:
+        #   min_points_per_cell -- within one frame a real surface projects many
+        #     pixels into a 5 cm cell; a stray sample projects one or two.
+        #   clamped log-odds -- occupancy accumulates across frames and free
+        #     evidence can outvote it, so a mistake is recoverable. The clamp is
+        #     what makes recovery possible: without it a cell hit often enough
+        #     could never be cleared again.
+        self._min_points_per_cell = min_points_per_cell
+        self._l_occ = l_occ
+        self._l_free = l_free
+        self._clamp = clamp
+        self._occ_threshold = occ_threshold
+        self._free_threshold = free_threshold
+        self._log_odds = np.zeros(
+            (self._grid_size, self._grid_size), dtype=np.int16
+        )
 
     # ── Public accessors ──
 
@@ -131,12 +162,24 @@ class SemanticMap:
         in_bounds = (rows >= 0) & (rows < gs) & (cols >= 0) & (cols < gs)
         rows_valid = rows[in_bounds]
         cols_valid = cols[in_bounds]
+        if rows_valid.size == 0:
+            return
 
-        # Mark occupied
-        self._occupancy[rows_valid, cols_valid] = 1
-        self._explored[rows_valid, cols_valid] = True
+        # How many points landed in each cell this frame? A real surface fills a
+        # 5 cm cell with many pixels; a bad sample contributes one or two, and
+        # those should not create an obstacle.
+        flat = rows_valid.astype(np.int64) * gs + cols_valid.astype(np.int64)
+        per_cell = np.bincount(flat, minlength=gs * gs)
+        hit_flat = np.nonzero(per_cell >= self._min_points_per_cell)[0]
+        if hit_flat.size == 0:
+            return
+        hit_rows, hit_cols = np.divmod(hit_flat, gs)
 
-        # Ray clearing: mark free cells between camera and each occupied cell
+        # Positive evidence at the surface.
+        self._log_odds[hit_rows, hit_cols] += self._l_occ
+        self._explored[hit_rows, hit_cols] = True
+
+        # Ray clearing: negative evidence between the camera and each surface.
         cam_world_xz = np.array([pose[0, 3], pose[2, 3]])
         cam_offset = cam_world_xz - self._origin
         cam_col = int(np.round(cam_offset[0] / self._resolution))
@@ -144,23 +187,26 @@ class SemanticMap:
         cam_row = max(0, min(gs - 1, cam_row))
         cam_col = max(0, min(gs - 1, cam_col))
 
-        # Subsample points for ray clearing (most rays overlap heavily)
-        unique_cells = np.unique(
-            np.column_stack([rows_valid, cols_valid]), axis=0
-        )
-        for r, c in unique_cells:
+        for r, c in zip(hit_rows, hit_cols):
             rr, rc = skimage_line(cam_row, cam_col, int(r), int(c))
-            # Mark all but last cell (the occupied endpoint) as free
-            if len(rr) > 1:
-                ray_r = rr[:-1]
-                ray_c = rc[:-1]
-                mask = (ray_r >= 0) & (ray_r < gs) & (ray_c >= 0) & (ray_c < gs)
-                ray_r = ray_r[mask]
-                ray_c = rc[:-1][mask]
-                # Only mark as free if not already occupied
-                not_occ = self._occupancy[ray_r, ray_c] != 1
-                self._occupancy[ray_r[not_occ], ray_c[not_occ]] = 0
-                self._explored[ray_r, ray_c] = True
+            if len(rr) <= 1:
+                continue
+            # Everything before the endpoint was seen through, so it is free.
+            ray_r, ray_c = rr[:-1], rc[:-1]
+            mask = (ray_r >= 0) & (ray_r < gs) & (ray_c >= 0) & (ray_c < gs)
+            ray_r, ray_c = ray_r[mask], ray_c[mask]
+            # Unlike the old version this is NOT gated on "not already
+            # occupied" -- that gate is precisely what made bad marks permanent.
+            self._log_odds[ray_r, ray_c] -= self._l_free
+            self._explored[ray_r, ray_c] = True
+
+        # Clamp so no cell becomes unrecoverable in either direction.
+        np.clip(self._log_odds, -self._clamp, self._clamp, out=self._log_odds)
+
+        # Derive the tri-state grid the planner consumes.
+        self._occupancy[:] = -1
+        self._occupancy[self._log_odds >= self._occ_threshold] = 1
+        self._occupancy[self._log_odds <= self._free_threshold] = 0
 
     # ── Detection update ──
 
