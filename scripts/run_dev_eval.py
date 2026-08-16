@@ -23,7 +23,7 @@ from src.sim.goat_dataset import load_val_unseen, sample_dev_subset
 from src.perception.detector import YOLODetector
 from src.perception.encoder import ClipEncoder
 from src.perception.pipeline import PerceptionPipeline
-from src.mapping.occupancy import SemanticMap
+from src.mapping.occupancy import SemanticMap, map_extent_for_scene
 from src.memory.instance_db import InstanceDatabase
 from src.matching.goal_matcher import GoalMatcher
 from src.agent.goat_agent import GoatAgent
@@ -32,9 +32,18 @@ from src.eval.report import save_results
 
 
 def build_agent(
-    intrinsics: np.ndarray, device: str = "cuda", camera_height: float = 1.41
+    intrinsics: np.ndarray,
+    device: str = "cuda",
+    camera_height: float = 1.41,
+    scene_bounds: tuple = None,
 ) -> GoatAgent:
-    """Build the full agent with all subsystems."""
+    """Build the full agent with all subsystems.
+
+    ``scene_bounds`` is ``(lo, hi)`` from ``HabitatEnv.get_scene_bounds()``. When
+    given, the occupancy grid is sized and centred on the scene; without it the
+    map falls back to a 24 m window on the world origin, which does not contain
+    18 of the 36 val scenes.
+    """
     detector = YOLODetector(device=device)
     encoder = ClipEncoder(device=device)
     perception = PerceptionPipeline(detector, encoder, intrinsics)
@@ -42,7 +51,13 @@ def build_agent(
     matcher = GoalMatcher(encoder)
     # camera_height lets the map derive the floor from the camera pose instead
     # of assuming floor Y == 0, which no HM3D scene satisfies.
-    semantic_map = SemanticMap(camera_height=camera_height)
+    if scene_bounds is not None:
+        size_m, origin = map_extent_for_scene(scene_bounds[0], scene_bounds[1])
+        semantic_map = SemanticMap(
+            size_m=size_m, origin=origin, camera_height=camera_height
+        )
+    else:
+        semantic_map = SemanticMap(camera_height=camera_height)
 
     return GoatAgent(
         perception=perception,
@@ -100,7 +115,9 @@ def main():
             continue
 
         intrinsics = env.intrinsics
-        agent = build_agent(intrinsics, device=args.device)
+        agent = build_agent(
+            intrinsics, device=args.device, scene_bounds=env.get_scene_bounds()
+        )
 
         for ep in scene_episodes:
             print(f"  Episode {ep.episode_id}: {len(ep.subtasks)} subtasks...", end=" ")

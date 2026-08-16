@@ -26,6 +26,10 @@ class Observation:
     compass: float           # heading in radians
     gps: np.ndarray          # [2] xz position in world frame
     current_goal: GoalSpec | None = None
+    # True when habitat refused the previous motion. Previously discarded, which
+    # left a blocked forward indistinguishable from a successful one to every
+    # layer above and let the agent grind against a wall for a whole subtask.
+    collided: bool = False
 
 
 # Action mapping: 0=stop, 1=forward, 2=turn_left, 3=turn_right
@@ -114,6 +118,7 @@ class HabitatEnv:
         self._step_count = 0
         self._done = False
         self._current_goal: GoalSpec | None = None
+        self._last_collided = False
 
     @property
     def intrinsics(self) -> np.ndarray:
@@ -147,11 +152,24 @@ class HabitatEnv:
         if action_name is None:
             raise ValueError(f"Invalid action: {action}")
 
+        before = np.asarray(self._agent.get_state().position, dtype=np.float64)
         self._sim.step(action_name)
         self._step_count += 1
+        after = np.asarray(self._agent.get_state().position, dtype=np.float64)
 
+        # Habitat exposes previous_step_collided on most builds; fall back to
+        # "commanded a translation but did not move" so this works either way.
+        collided = bool(getattr(self._sim, "previous_step_collided", False))
+        if action_name == "move_forward" and not collided:
+            collided = float(np.linalg.norm(after - before)) < 1e-3
+
+        self._last_collided = collided
         obs = self._make_obs()
-        info = {"action": action_name, "step": self._step_count}
+        info = {
+            "action": action_name,
+            "step": self._step_count,
+            "collided": collided,
+        }
         return obs, False, info
 
     def get_pose(self) -> np.ndarray:
@@ -226,4 +244,10 @@ class HabitatEnv:
             compass=self.get_compass(),
             gps=self.get_gps(),
             current_goal=self._current_goal,
+            # Carry the last step's collision result. The eval loop calls
+            # _make_obs() itself and feeds THAT to the agent, discarding the
+            # Observation returned by step() -- so a flag set only there never
+            # reaches the agent, and it will press forward into a wall for the
+            # whole subtask (observed: 200 consecutive forwards, 0.00 m moved).
+            collided=self._last_collided,
         )

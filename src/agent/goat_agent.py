@@ -20,6 +20,20 @@ SEARCH_GIVEUP_TURNS = 12
 # When a matched node is unreachable, try a few replans/turns before falling
 # back to exploration rather than stopping (a stop counts as failure).
 APPROACH_GIVEUP_TURNS = 4
+# Waypoint distance ahead of the agent along the path, in grid cells. One
+# forward action covers 0.25 m = 5 cells at the default 0.05 m resolution, so
+# the aim point must be at least that far or every step overshoots it.
+LOOKAHEAD_CELLS = 10
+# A waypoint within this many cells counts as reached and is retired. Must be
+# comfortably larger than one forward step (5 cells) or the agent can step past
+# a waypoint without ever "arriving" at it and orbit it instead.
+ARRIVE_CELLS = 7
+# The end of the path is only "reached" this close (0.10 m). Using the looser
+# intermediate radius here strands the agent just outside its goal.
+FINAL_ARRIVE_CELLS = 2
+# Re-plan periodically: the map changes every step, and a path planned through
+# what later turns out to be a wall was otherwise followed to its end.
+REPLAN_EVERY_STEPS = 15
 
 
 class AgentState(enum.Enum):
@@ -66,6 +80,8 @@ class GoatAgent:
         self._no_plan_count = 0
         self._visited_frontiers: set[tuple[int, int]] = set()
         self._verify_steps = 0
+        self._steps_since_replan = 0
+        self._frontier_target: tuple[int, int] | None = None
 
     def reset(self, obs: Observation, keep_memory: bool = False) -> None:
         """Reset for a new subtask. If keep_memory, preserve memory and map."""
@@ -78,6 +94,8 @@ class GoatAgent:
         self._no_plan_count = 0
         self._visited_frontiers = set()
         self._verify_steps = 0
+        self._steps_since_replan = 0
+        self._frontier_target = None
 
         if not keep_memory:
             pass  # memory.clear() would go here if InstanceDatabase had a clear method
@@ -89,9 +107,16 @@ class GoatAgent:
             return 0
 
         self.step_count += 1
+        self._steps_since_replan += 1
         if self.step_count >= self.max_steps:
             self.state = AgentState.DONE
             return 0
+
+        # A blocked forward means the map thinks a cell is free that is not.
+        # Record that evidence and force a replan, otherwise the agent grinds
+        # against the wall for the rest of the subtask.
+        if getattr(obs, "collided", False):
+            self._note_collision(obs)
 
         # 1. Perception: detect objects, update map and memory
         detections = self.perception.process(obs, step=self.step_count)
@@ -158,11 +183,9 @@ class GoatAgent:
         agent_ij = self.semantic_map.world_to_grid(self._agent_xy(obs))
         target_ij = self.semantic_map.world_to_grid(target_xy)
 
-        # Replan if no path
-        if self._current_path is None or self._path_idx >= len(self._current_path):
+        if self._needs_replan():
             occ = self.semantic_map.get_occupancy()
-            self._current_path = plan_astar(occ, agent_ij, target_ij)
-            self._path_idx = 0
+            self._set_path(plan_astar(occ, agent_ij, target_ij))
 
             if self._current_path is None:
                 self._no_plan_count += 1
@@ -177,7 +200,12 @@ class GoatAgent:
             else:
                 self._no_plan_count = 0
 
-        return self._follow_path(obs, agent_ij)
+        action = self._follow_path(obs, agent_ij)
+        if action is None:
+            # Path finished or invalid; force a fresh plan on the next tick.
+            self._current_path = None
+            return 2
+        return action
 
     def _act_searching(self, obs: Observation) -> int:
         """Explore via frontiers."""
@@ -186,7 +214,7 @@ class GoatAgent:
         explored = self.semantic_map.get_explored()
 
         # Need a new frontier target?
-        if self._current_path is None or self._path_idx >= len(self._current_path):
+        if self._needs_replan():
             frontiers = find_frontiers(occ, explored)
             target = choose_frontier(frontiers, agent_ij, self._visited_frontiers)
 
@@ -197,8 +225,7 @@ class GoatAgent:
                     return 0
                 return 2  # spin to survey for frontiers
 
-            self._current_path = plan_astar(occ, agent_ij, target.centroid_ij)
-            self._path_idx = 0
+            self._set_path(plan_astar(occ, agent_ij, target.centroid_ij))
 
             if self._current_path is None:
                 self._visited_frontiers.add(target.centroid_ij)
@@ -208,29 +235,114 @@ class GoatAgent:
                     return 0
                 return 2
             else:
+                self._frontier_target = target.centroid_ij
                 self._no_plan_count = 0
 
-        return self._follow_path(obs, agent_ij)
+        action = self._follow_path(obs, agent_ij)
+        if action is None:
+            # Path to this frontier is finished. Retire it now -- marking on
+            # SELECTION instead blacklists a frontier the agent is still driving
+            # toward, and with choose_frontier's proximity radius that quickly
+            # exhausts every candidate and forces a premature give-up.
+            if self._frontier_target is not None:
+                self._visited_frontiers.add(self._frontier_target)
+                self._frontier_target = None
+            self._current_path = None
+            return 2
+        return action
+
+    def _note_collision(self, obs: Observation) -> None:
+        """Mark the cell just ahead as occupied and invalidate the path.
+
+        Habitat refused the motion, so whatever is there is solid regardless of
+        what depth suggested. Without this the agent has no way to learn from a
+        blocked step -- env.step() used to discard the collision flag entirely.
+        """
+        xy = self._agent_xy(obs)
+        heading = float(obs.compass)
+        ahead = xy + np.array([-math.sin(heading), -math.cos(heading)]) * 0.25
+        r, c = self.semantic_map.world_to_grid(ahead)
+        self.semantic_map.mark_occupied(r, c)
+        self._current_path = None
+
+    # ── Path bookkeeping ──
+
+    def _set_path(self, path) -> None:
+        self._current_path = path
+        self._path_idx = 0
+        self._steps_since_replan = 0
+
+    def _needs_replan(self) -> bool:
+        """Replan when there is no path, it is exhausted, it has gone stale, or
+        the remaining route now runs through cells the map calls occupied."""
+        if self._current_path is None or self._path_idx >= len(self._current_path):
+            return True
+        if self._steps_since_replan >= REPLAN_EVERY_STEPS:
+            return True
+        occ = self.semantic_map.get_occupancy()
+        for (r, c) in self._current_path[self._path_idx:]:
+            if 0 <= r < occ.shape[0] and 0 <= c < occ.shape[1] and occ[r, c] == 1:
+                return True
+        return False
 
     def _follow_path(self, obs: Observation, agent_ij: tuple[int, int]) -> int:
-        """Follow the current path, advancing the path index."""
-        if self._current_path is None or self._path_idx >= len(self._current_path):
-            return 1  # forward fallback
+        """Follow the current path toward a waypoint at least one step away.
 
-        # Pick a waypoint a few steps ahead for smoother movement
-        lookahead = min(self._path_idx + 3, len(self._current_path) - 1)
-        next_ij = self._current_path[lookahead]
+        Two unit bugs used to live here. The aim point was 3 cells (0.15 m)
+        ahead while one forward action covers 0.25 m, so every step overshot the
+        waypoint it was aimed at; and ``_path_idx`` advanced 4 cells per step
+        while the body moved 5, so the cursor drifted monotonically behind the
+        agent and was never resynchronised against its true position.
+
+        The cursor is now re-anchored to the closest point on the path each
+        call, and the waypoint is chosen a fixed distance ahead of that anchor.
+        """
+        if self._current_path is None or not self._current_path:
+            return None  # caller replans; never a blind forward
+
+        path = self._current_path
+        ar, ac = agent_ij
+
+        def dist_to(i: int) -> float:
+            pr, pc = path[i]
+            return math.hypot(pr - ar, pc - ac)
+
+        # Pure pursuit. Retire INTERMEDIATE waypoints the agent has reached, then
+        # aim at the first one at least LOOKAHEAD_CELLS away.
+        #
+        # Picking the globally *nearest* path cell instead does not work: once
+        # the agent overshoots its aim point the nearest cell is still behind it,
+        # the cursor never advances, and it turns back toward the same waypoint
+        # forever -- 500 steps at 0.00 m with the index pinned at 0.
+        last = len(path) - 1
+        while self._path_idx < last and dist_to(self._path_idx) <= ARRIVE_CELLS:
+            self._path_idx += 1
+
+        target_i = self._path_idx
+        while target_i < last and dist_to(target_i) < LOOKAHEAD_CELLS:
+            target_i += 1
+
+        # The FINAL waypoint gets a much tighter arrival radius than the
+        # intermediate ones. Retiring it at ARRIVE_CELLS too means that as soon
+        # as the remaining path is short, every waypoint counts as reached, this
+        # returns None, the caller turns and replans, and the agent orbits just
+        # outside the goal -- subtasks stalling at 1.4-2.1 m from a 1.0 m
+        # success radius.
+        if target_i == last and dist_to(last) <= FINAL_ARRIVE_CELLS:
+            return None  # genuinely arrived; caller replans
+
+        next_ij = path[target_i]
 
         action = path_to_action(
             agent_ij=agent_ij,
             heading=float(obs.compass),
             next_ij=next_ij,
         )
-
-        # Advance path index if moving forward
-        if action == 1:
-            self._path_idx = lookahead + 1
-
+        # path_to_action returns 0 when the waypoint IS the agent's cell. That
+        # means "waypoint reached", not "stop the episode" -- propagating it
+        # would end the subtask on a bookkeeping artefact.
+        if action == 0:
+            return None
         return action
 
     def _distance_to_node(self, obs: Observation, node) -> float:

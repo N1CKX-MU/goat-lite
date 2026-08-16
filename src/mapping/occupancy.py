@@ -16,6 +16,28 @@ from src.mapping.transforms import (
 )
 
 
+def map_extent_for_scene(
+    bounds_lo, bounds_hi, margin_m: float = 2.0, min_size_m: float = 12.0
+) -> tuple[float, tuple[float, float]]:
+    """Grid size and origin covering a scene's navigable extent.
+
+    Returns ``(size_m, origin_xz)`` for SemanticMap. Square, because the grid is
+    square, and padded so the agent can map slightly past the navmesh edge.
+
+    Sizing the map to the scene matters: over the 36 GOAT-Bench val scenes the
+    default 24 m window centred on the world origin fails to contain 18 of them.
+    """
+    lo = np.asarray(bounds_lo, dtype=np.float64)
+    hi = np.asarray(bounds_hi, dtype=np.float64)
+    ext_x = float(hi[0] - lo[0])
+    ext_z = float(hi[2] - lo[2])
+    size = max(ext_x, ext_z) + 2.0 * margin_m
+    size = max(size, min_size_m)
+    cx = float(lo[0] + hi[0]) / 2.0
+    cz = float(lo[2] + hi[2]) / 2.0
+    return size, (cx - size / 2.0, cz - size / 2.0)
+
+
 class SemanticMap:
     def __init__(
         self,
@@ -32,6 +54,7 @@ class SemanticMap:
         clamp: int = 12,
         occ_threshold: int = 3,
         free_threshold: int = -2,
+        origin: tuple[float, float] | None = None,
     ):
         self._size_m = size_m
         self._resolution = resolution_m
@@ -47,8 +70,18 @@ class SemanticMap:
         self._max_height = max_height
 
         self._grid_size = int(size_m / resolution_m)
-        # Origin is at (-size/2, -size/2) in world XZ
-        self._origin = np.array([-size_m / 2.0, -size_m / 2.0])
+        # World XZ of grid cell (0, 0). Defaults to a window centred on the
+        # WORLD origin, which is wrong for HM3D: measured over the 36 val
+        # scenes, 18 do not fit inside a 24 m window placed there and 4 are
+        # larger than 24 m outright (00894 spans 33.8 m). Anything outside stays
+        # permanently unknown, so the agent cannot plan through regions of half
+        # the val set. Callers should pass an origin derived from
+        # HabitatEnv.get_scene_bounds().
+        self._origin = (
+            np.asarray(origin, dtype=np.float64)
+            if origin is not None
+            else np.array([-size_m / 2.0, -size_m / 2.0])
+        )
 
         # Grids
         self._occupancy = np.full(
@@ -249,6 +282,20 @@ class SemanticMap:
                     if 0 <= ri < gs and 0 <= ci < gs:
                         w = kernel[dr + half, dc + half]
                         self._class_counts[ri, ci, cls_id] += w
+
+    def mark_occupied(self, row: int, col: int, weight: int | None = None) -> None:
+        """Force strong occupancy evidence into one cell.
+
+        Used when habitat refuses a motion: whatever is there is solid, whatever
+        the depth sensor suggested. Applied at the clamp so a single collision
+        outvotes accumulated free evidence immediately.
+        """
+        gs = self._grid_size
+        if not (0 <= row < gs and 0 <= col < gs):
+            return
+        self._log_odds[row, col] = self._clamp if weight is None else weight
+        self._explored[row, col] = True
+        self._occupancy[row, col] = 1
 
     @property
     def dropped_cls_ids(self) -> set[int]:

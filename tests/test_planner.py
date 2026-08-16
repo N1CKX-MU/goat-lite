@@ -13,11 +13,17 @@ def _make_free_map(h=50, w=50):
     return np.zeros((h, w), dtype=np.int8)
 
 
-def _make_map_with_wall(h=50, w=50):
-    """Free map with a wall across the middle, gap at col=25."""
+def _make_map_with_wall(h=50, w=50, gap_half_width=6):
+    """Free map with a wall across the middle and a doorway-sized gap.
+
+    The gap must be wide enough for an inflated agent. plan_astar hard-blocks
+    the dilated obstacle band (4 cells = 0.20 m, just over the 0.17 m agent
+    radius), so a 1-cell gap is correctly impassable -- see
+    test_narrow_gap_is_refused. At 0.05 m/cell this gap is ~0.6 m, a doorway.
+    """
     occ = np.zeros((h, w), dtype=np.int8)
     occ[25, :] = 1  # wall
-    occ[25, 25] = 0  # gap
+    occ[25, 25 - gap_half_width:25 + gap_half_width + 1] = 0  # gap
     return occ
 
 
@@ -38,9 +44,51 @@ class TestAstar:
         assert path is not None
         assert path[0] == (10, 10)
         assert path[-1] == (40, 10)
-        # Path must go through the gap at col=25
+        # Path must cross the wall row inside the gap
         cols_at_wall_row = [c for r, c in path if r == 25]
-        assert any(c == 25 for c in cols_at_wall_row)
+        assert cols_at_wall_row
+        assert all(19 <= c <= 31 for c in cols_at_wall_row)
+
+    def test_narrow_gap_is_refused(self):
+        """A gap narrower than the agent must not be planned through.
+
+        The old planner applied inflation as a cost penalty only, so it happily
+        threaded a 5 cm gap with a 17 cm-radius agent and the resulting path put
+        the agent into the wall. Inflation is now a hard constraint.
+        """
+        occ = np.zeros((50, 50), dtype=np.int8)
+        occ[25, :] = 1
+        occ[25, 25] = 0  # single-cell gap = 0.05 m
+        assert plan_astar(occ, (10, 10), (40, 10)) is None
+
+    def test_path_keeps_clear_of_obstacles(self):
+        """No waypoint may sit inside the inflated band around an obstacle."""
+        occ = np.zeros((50, 50), dtype=np.int8)
+        occ[20:30, 25] = 1  # a pillar
+        path = plan_astar(occ, (25, 5), (25, 45), inflate_cells=4)
+        assert path is not None
+        for r, c in path:
+            # every waypoint at least inflate_cells away from the pillar
+            if 20 <= r < 30:
+                assert abs(c - 25) > 4, f"waypoint ({r},{c}) is inside the margin"
+
+    def test_unknown_is_passable_but_penalised(self):
+        """Frontier goals live in unknown space, so it must remain traversable.
+
+        It must not, however, be preferred over a known-free route of similar
+        length -- the old planner charged nothing extra for unexplored cells.
+        """
+        occ = np.zeros((50, 50), dtype=np.int8)
+        occ[:, 20:30] = -1  # band of unknown
+        assert plan_astar(occ, (25, 5), (25, 45)) is not None
+
+        # Given a free detour of equal-ish length, prefer the known-free cells.
+        occ2 = np.zeros((21, 41), dtype=np.int8)
+        occ2[10, 5:35] = -1
+        path = plan_astar(occ2, (10, 0), (10, 40))
+        assert path is not None
+        unknown_cells = sum(1 for r, c in path if occ2[r, c] == -1)
+        assert unknown_cells < 30, "planner should route around unknown when cheap"
 
     def test_no_path_fully_blocked(self):
         occ = np.zeros((50, 50), dtype=np.int8)
