@@ -185,7 +185,8 @@ class GoatAgent:
 
         if self._needs_replan():
             occ = self.semantic_map.get_occupancy()
-            self._set_path(plan_astar(occ, agent_ij, target_ij))
+            goal_ij = self._approach_cell(occ, agent_ij, target_ij)
+            self._set_path(plan_astar(occ, agent_ij, goal_ij))
 
             if self._current_path is None:
                 self._no_plan_count += 1
@@ -250,6 +251,45 @@ class GoatAgent:
             self._current_path = None
             return 2
         return action
+
+    def _approach_cell(self, occ, agent_ij, target_ij):
+        """A standable cell from which the target is within success_distance.
+
+        Most GOAT categories are wall-mounted or wall-adjacent -- picture,
+        mirror, window glass, radiator. Their estimated position therefore lands
+        ON the wall, that cell reads OCCUPIED, and planning straight to it
+        returns None every time, so the agent can never approach them at all.
+        Observed as APPROACHING with a zero-length path, turning in place while
+        2.7 m from a picture it had correctly matched.
+
+        Navigate to a viewpoint beside the object instead, which is what the
+        success criterion actually asks for: be within 1 m of it, not on it.
+        """
+        gs = occ.shape[0]
+        tr, tc = int(target_ij[0]), int(target_ij[1])
+        if not (0 <= tr < gs and 0 <= tc < occ.shape[1]):
+            return target_ij
+        if occ[tr, tc] != 1:
+            return target_ij  # already standable, nothing to do
+
+        radius = max(1, int(self.success_distance / self.semantic_map._resolution))
+        ar, ac = agent_ij
+        best, best_key = None, None
+        r0, r1 = max(0, tr - radius), min(gs, tr + radius + 1)
+        c0, c1 = max(0, tc - radius), min(occ.shape[1], tc + radius + 1)
+        for r in range(r0, r1):
+            for c in range(c0, c1):
+                if occ[r, c] != 0:  # must be known-free to stand on
+                    continue
+                d_target = math.hypot(r - tr, c - tc)
+                if d_target > radius:
+                    continue
+                # Closest to the object, breaking ties toward the agent so the
+                # detour stays short.
+                key = (round(d_target, 3), math.hypot(r - ar, c - ac))
+                if best_key is None or key < best_key:
+                    best, best_key = (r, c), key
+        return best if best is not None else target_ij
 
     def _note_collision(self, obs: Observation) -> None:
         """Mark the cell just ahead as occupied and invalidate the path.
