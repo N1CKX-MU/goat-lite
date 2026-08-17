@@ -5,6 +5,9 @@ channels:
   - defaults
 dependencies:
   - python=3.9
-  - habitat-sim=0.3.1=headless*
+  # Build string must be globbed from the front: the aihabitat builds are named
+  # py3.9_headless_linux_<hash>, so a bare `headless*` matches nothing and conda
+  # fails with PackagesNotFoundInChannelsError.
+  - habitat-sim=0.3.1=py3.9_headless_linux*
   - pip:
     - -r requirements.txt
