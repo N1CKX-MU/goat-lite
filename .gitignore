@@ -1,8 +1,15 @@
 # Data and model weights
 data/
-checkpoints/
+checkpoints/*
 outputs/
 *.pt
+
+# Exception: the finetuned GOAT detector IS the deliverable of TRAIN_YOLO.md and
+# collaborators need it to run the eval at all. 6 MB, so tracking it directly is
+# reasonable; anything larger should go to a GitHub Release instead.
+# (Note the blanket rule above is 'checkpoints/*', not 'checkpoints/' -- git
+# cannot un-ignore a file inside an excluded directory.)
+!checkpoints/yolo_goat.pt
 
 # Experiment tracking
 wandb/
