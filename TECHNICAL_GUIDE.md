@@ -2186,6 +2186,78 @@ Also unresolved: `map says FREE` agreement is only 42.8%, i.e. the map is
 over-generous about free space near walls, which is consistent with the
 overshoot theory.
 
+### 2026-08-17 — The visualiser, and the failure moving into perception
+
+#### 6.28 Build the visualiser first
+
+`src/utils/viz.py` and `scripts/make_video.py` were empty stubs for the whole
+project. Filling the first one (plus `scripts/debug_episode.py`) found two
+bugs in two frames that fourteen rounds of printing numbers had not.
+
+The view shows, side by side: the occupancy grid, the current plan, the agent's
+real track, every remembered instance with the matched one highlighted, the
+**ground-truth** goal positions and their success radii (which the agent never
+sees), the first-person view with detector boxes, and the live FSM state.
+
+#### 6.29 Wall-mounted goals were unreachable by construction
+
+**Symptom.** One frame: the agent in open floor, state APPROACHING, **path
+length 0**, turning in place 2.72 m from a picture whose instance it had
+matched correctly. The matched node sat exactly on a ground-truth cross.
+
+**Cause.** Pictures, mirrors, window glass and radiators hang on or against
+walls, so the instance's estimated position lands on the wall. That cell reads
+OCCUPIED and `plan_astar` refuses:
+
+```python
+if occupied[gr, gc]:
+    return None
+```
+
+Every wall-mounted category — most of the vocabulary — could never be
+approached. It also explains why every success all session was a dresser:
+dressers stand proud of the wall.
+
+**Fix.** `_approach_cell()` plans to the nearest known-free cell within
+`success_distance` of the object instead of to the object. That is what the
+success criterion asks for: be within 1 m of it, not standing on it.
+
+#### 6.30 Open: the agent now stops confidently at the wrong object
+
+With navigation working, the failure moved into perception. A traced subtask:
+
+```
+dist to TRUE goal  12.17 m
+dist to node        0.70 m
+state  DONE     action STOP
+```
+
+The agent matched a false instance, navigated to it correctly, verified it and
+stopped — 12 m from the real microwave. Navigation, planning and control all
+behaved; the target was wrong.
+
+This is the direct cost of lowering detector `conf` from 0.35 to 0.15 (6.23).
+That fix was necessary — at 0.35 the agent saw nothing in 4 frames out of 5 —
+but it admits false positives into instance memory. Worse, a *consistent* false
+positive also defeats VERIFYING: the node carries the detector's label, so when
+the same wrong detection reappears on arrival, verification passes.
+
+Options, none yet chosen:
+
+1. **Require evidence before a node is targetable** — mirror the occupancy
+   log-odds idea in `InstanceDatabase`: a node seen once at conf 0.15 should not
+   be a navigation goal. Requires N observations or an aggregate confidence.
+   Principled, and does not sacrifice recall.
+2. **Two thresholds** — a low `conf` for mapping//memory and a higher one for
+   accepting a node as a goal.
+3. **Finish the 60-epoch detector run** (stopped at 39/60 when the laptop slept;
+   the LR schedule never annealed) and re-measure precision.
+
+Current state on the 2-episode smoke test: median distance to goal 3.31 m, best
+0.68 m, SR still 0%. Navigation metrics are good — blocked forwards 0%,
+map-vs-navmesh obstacle error 0%. **The binding constraint is now detector
+precision, not navigation.**
+
 #### Categories at risk (for the report's error analysis)
 
 From a 12-scene val census, these GOAT categories had **zero** instances even
