@@ -147,6 +147,17 @@ def main():
 
         env.close()
 
+        # Checkpoint after every scene. habitat's GL context has died mid-run
+        # under WSL (EGL_NOT_INITIALIZED on a later scene load), and that is a
+        # native abort -- no Python exception, no chance to save on the way out.
+        # A full dev eval is hours, so losing all of it to a flaky driver on the
+        # last scene is not acceptable. Saving per scene makes any crash cost at
+        # most one scene.
+        if all_results:
+            save_results(all_results, args.output_dir)
+            print(f"  [checkpoint] {len(all_results)} subtasks saved to "
+                  f"{args.output_dir}")
+
     # Save results
     if all_results:
         save_results(all_results, args.output_dir)
