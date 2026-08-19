@@ -126,6 +126,17 @@ def main() -> None:
         d_node = (agent._distance_to_node(obs, agent._matched_node)
                   if agent._matched_node is not None else float("nan"))
 
+        # Re-run the match purely to report its score. A wrong match is only
+        # diagnosable alongside what the matcher scored and what it rejected.
+        _, match_score = agent.matcher.match(obs.current_goal, agent.memory, xy)
+        candidates = agent.memory.query_by_class_name(sub.category)
+        matched_err = float("nan")
+        if agent._matched_node is not None and goals:
+            mp = np.asarray(agent._matched_node.world_xyz)
+            matched_err = min(
+                float(np.hypot(mp[0] - g[0], mp[2] - g[2])) for g in goals
+            )
+
         top = render_topdown(
             agent.semantic_map, xy, float(obs.compass),
             path=agent._current_path,
@@ -133,6 +144,7 @@ def main() -> None:
             nodes=agent.memory.all_nodes(),
             matched_node=agent._matched_node,
             goal_positions=goals,
+            goal_category=sub.category,
             success_radius=agent.success_distance,
         )
         fpv = draw_detections(obs.rgb, detections)
@@ -146,6 +158,10 @@ def main() -> None:
             f"dist to TRUE goal  {d_goal:.2f} m",
             f"dist to node       {d_node:.2f} m",
             f"success radius     {agent.success_distance:.2f} m",
+            "",
+            f"match score        {match_score:.3f}",
+            f"MATCH ERROR        {matched_err:.2f} m",
+            f"same-class nodes   {len(candidates)}",
             "",
             f"path len   {len(agent._current_path) if agent._current_path else 0}",
             f"path idx   {agent._path_idx}",

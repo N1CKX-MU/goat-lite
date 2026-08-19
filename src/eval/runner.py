@@ -61,6 +61,7 @@ def _make_goal_spec(subtask: SubtaskSpec) -> GoalSpec:
             modality="category",
             value=subtask.category,
             subtask_index=subtask.subtask_index,
+            category=subtask.category,
         )
     elif subtask.modality == "language":
         desc = subtask.goal_info.lang_desc if subtask.goal_info else subtask.category
@@ -68,6 +69,7 @@ def _make_goal_spec(subtask: SubtaskSpec) -> GoalSpec:
             modality="language",
             value=desc,
             subtask_index=subtask.subtask_index,
+            category=subtask.category,
         )
     elif subtask.modality == "image":
         # Image goals are localized by their target category (the finetuned
@@ -77,12 +79,14 @@ def _make_goal_spec(subtask: SubtaskSpec) -> GoalSpec:
             modality="image",
             value=subtask.category,
             subtask_index=subtask.subtask_index,
+            category=subtask.category,
         )
     else:
         return GoalSpec(
             modality="category",
             value=subtask.category,
             subtask_index=subtask.subtask_index,
+            category=subtask.category,
         )
 
 

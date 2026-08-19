@@ -25,6 +25,10 @@ C_NODE = (190, 150, 255)
 C_NODE_MATCH = (120, 255, 160)
 C_GOAL = (70, 110, 255)
 C_TEXT = (240, 240, 240)
+# A node whose class equals the goal category: a candidate the matcher could
+# have picked. Distinguishing these from the rest is what makes a wrong match
+# legible -- otherwise every remembered instance is an anonymous dot.
+C_NODE_CANDIDATE = (110, 200, 255)
 
 
 def occupancy_to_bgr(occupancy: np.ndarray) -> np.ndarray:
@@ -46,6 +50,8 @@ def render_topdown(
     nodes=None,
     matched_node=None,
     goal_positions=None,
+    goal_category: str | None = None,
+    label_candidates: bool = True,
     success_radius: float = 1.0,
     out_size: int = 520,
     margin_cells: int = 24,
@@ -130,14 +136,33 @@ def render_topdown(
             cv2.circle(canvas, pts[-1], 5, C_PATH, -1, cv2.LINE_AA)
 
     # ── what it remembers seeing ────────────────────────────────────────
+    # Nodes of the goal's own class are drawn distinctly and labelled: a wrong
+    # match is only diagnosable if you can see which candidates were available
+    # and which one was taken.
     if nodes:
         for n in nodes:
             p = to_px(np.asarray(n.world_xyz)[[0, 2]])
             is_match = matched_node is not None and n is matched_node
-            cv2.circle(canvas, p, 5 if is_match else 3,
-                       C_NODE_MATCH if is_match else C_NODE, -1, cv2.LINE_AA)
+            is_candidate = (
+                goal_category is not None
+                and getattr(n, "cls_name", None) == goal_category
+            )
+            if is_match:
+                colour, radius = C_NODE_MATCH, 5
+            elif is_candidate:
+                colour, radius = C_NODE_CANDIDATE, 4
+            else:
+                colour, radius = C_NODE, 2
+            cv2.circle(canvas, p, radius, colour, -1, cv2.LINE_AA)
             if is_match:
                 cv2.circle(canvas, p, 10, C_NODE_MATCH, 1, cv2.LINE_AA)
+            if label_candidates and (is_candidate or is_match):
+                conf = getattr(n, "confidence", None)
+                txt = getattr(n, "cls_name", "?")
+                if conf is not None:
+                    txt = f"{txt} {conf:.2f}"
+                cv2.putText(canvas, txt, (p[0] + 7, p[1] - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.32, colour, 1, cv2.LINE_AA)
 
     # ── the truth, which the agent never sees ───────────────────────────
     if goal_positions is not None:
@@ -193,10 +218,11 @@ def compose_frame(topdown, fpv, lines, width_pad: int = 300):
 def legend_lines() -> list[str]:
     return [
         "white dot  agent",
-        "cyan       planned path",
+        "cyan line  planned path",
         "olive      actual track",
-        "violet     memory nodes",
-        "green      matched node",
+        "green      MATCHED node",
+        "blue       same-class candidate",
+        "violet     other memory nodes",
         "red cross  TRUE goal",
         "red circle 1.0 m success",
     ]

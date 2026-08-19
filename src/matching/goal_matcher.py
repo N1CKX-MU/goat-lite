@@ -69,7 +69,21 @@ class GoalMatcher:
     def _match_language(
         self, goal: GoalSpec, db: InstanceDatabase
     ) -> tuple[InstanceNode | None, float]:
-        nodes = db.all_nodes()
+        # A GOAT-Bench language goal always describes an instance OF a known
+        # category ("the mirror next to the sink" is a mirror), and that
+        # category travels on the GoalSpec. Restrict candidates to it.
+        #
+        # Scoring the description against every remembered instance instead
+        # lets a barely-above-threshold CLIP similarity win outright: observed
+        # a "window glass" node matched at 0.257 for a microwave goal, with
+        # ZERO microwave nodes in memory, after which the agent navigated to
+        # the window and confidently stopped 12.5 m from the real target.
+        # With no same-class candidate the honest answer is "not found yet" --
+        # returning None keeps the agent exploring instead.
+        if goal.category:
+            nodes = db.query_by_class_name(goal.category)
+        else:
+            nodes = db.all_nodes()
         if not nodes:
             return None, 0.0
 

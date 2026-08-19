@@ -16,6 +16,12 @@ class GoalSpec:
     value: str
     episode_step: int = 0
     subtask_index: int = 0
+    # The GOAT category this goal refers to. Present for every modality --
+    # a language goal is a description OF a known category, and an image goal
+    # is a picture OF one. Without it the language matcher scores the
+    # description against every remembered instance regardless of class and
+    # will happily return a window for "microwave".
+    category: str | None = None
 
 
 @dataclass
