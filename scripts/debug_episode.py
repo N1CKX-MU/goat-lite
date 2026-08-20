@@ -112,6 +112,7 @@ def main() -> None:
     track = []
     stalled = 0
     prev_xy = env.get_gps().copy()
+    closest, closest_step, closest_in_view = float("inf"), -1, False
 
     for step in range(args.steps):
         obs = env._make_obs()
@@ -129,6 +130,11 @@ def main() -> None:
         # Re-run the match purely to report its score. A wrong match is only
         # diagnosable alongside what the matcher scored and what it rejected.
         _, match_score = agent.matcher.match(obs.current_goal, agent.memory, xy)
+        goal_in_view = agent._goal_in_view(detections)
+        seen = sorted({d.cls_name for d in detections})
+        seen_classes = ",".join(seen)[:26] if seen else "-"
+        if d_goal < closest:
+            closest, closest_step, closest_in_view = d_goal, step, goal_in_view
         candidates = agent.memory.query_by_class_name(sub.category)
         matched_err = float("nan")
         if agent._matched_node is not None and goals:
@@ -163,6 +169,13 @@ def main() -> None:
             f"MATCH ERROR        {matched_err:.2f} m",
             f"same-class nodes   {len(candidates)}",
             "",
+            # The two predicates that gate STOP. Being within the radius is not
+            # enough: VERIFYING must fire (on distance to the NODE, not the true
+            # goal) and the goal class must be detected in the current frame.
+            f"goal in view       {goal_in_view}",
+            f"detected classes   {seen_classes}",
+            f"verify steps       {agent._verify_steps}",
+            "",
             f"path len   {len(agent._current_path) if agent._current_path else 0}",
             f"path idx   {agent._path_idx}",
             f"memory     {len(agent.memory.all_nodes())} nodes",
@@ -195,6 +208,11 @@ def main() -> None:
             default=float("nan"))
     print(f"\nfinished {d:.2f} m from the nearest valid instance "
           f"(success needs <= {agent.success_distance} m and the goal in view)")
+    print(f"CLOSEST approach: {closest:.2f} m at step {closest_step}, "
+          f"goal_in_view={closest_in_view}")
+    if closest <= agent.success_distance:
+        print("  -> it WAS inside the success radius; failure is the stop "
+              "condition, not navigation")
     print(f"wrote {args.out}/")
     env.close()
 
