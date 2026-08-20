@@ -2258,6 +2258,74 @@ Current state on the 2-episode smoke test: median distance to goal 3.31 m, best
 map-vs-navmesh obstacle error 0%. **The binding constraint is now detector
 precision, not navigation.**
 
+### 2026-08-19 — Measuring the ceiling instead of assuming it
+
+#### 6.31 Language goals matched any class
+
+`_match_language` scored the description's CLIP embedding against **every**
+remembered instance regardless of class. The debug visualiser, extended to
+label same-class candidates and report the match score, showed it directly:
+
+```
+goal              language/microwave
+match score       0.257
+same-class nodes  0
+matched node      "window glass 0.25"
+```
+
+With no microwave in memory at all, a window scraped past the 0.24 threshold
+and won. The agent navigated to it correctly, passed VERIFYING -- the node
+carries the detector's own label, so the false detection that created it also
+confirms it -- and stopped 12.5 m from the real target.
+
+A GOAT-Bench language goal always describes an instance **of a known
+category**, and that category was sitting unused on the subtask. `GoalSpec` now
+carries it for every modality and language matching is restricted to that
+class, returning None when there are no candidates: "not found yet" keeps the
+agent exploring, which beats committing to the wrong object.
+
+#### 6.32 The detector-limited SR ceiling: 59.2%
+
+A subtask succeeds only if the agent stops within 1 m of a valid instance
+**with it in view** -- and "in view" means the detector fires on the goal class.
+So the honest question is not "why is SR low" but "how many subtasks are
+winnable at all".
+
+`scripts/detector_ceiling.py` parks the agent at a ring of navigable poses
+around every ground-truth instance, facing it (8 angles x 3 radii), and asks
+the detector directly. Over the full 30-episode dev subset, 218 subtasks:
+
+| | |
+|---|---|
+| detector ever fires on the goal | **129 (59.2%)** |
+| **impossible for any navigator** | **89 (40.8%)** |
+
+By modality: category **75.3%**, language **55.7%**, image **43.3%** (the probe
+is modality-independent, so this reflects which instances each modality
+targets). Seven categories are at **0%** -- `calendar`, `christmas tree`,
+`island`, `glass`, `statue`, `piano`, `hanging clothes` -- 32 subtasks that
+cannot succeed however good navigation gets.
+
+Training-set size predicts the ceiling only loosely. `pillow`/`picture`/`book`
+(4653/4171/1624 boxes) reach 100%, and `christmas tree` at 0 boxes is
+trivially 0%. But `refrigerator` has 404 boxes and reaches only 26.7%, and
+`hanging clothes` has 241 and reaches **0%** -- so for some categories the
+failure is domain shift between HM3D train and val scenes, or object scale,
+rather than raw data volume. Worth stating in the error analysis rather than
+implying a clean correlation.
+
+**Two consequences.**
+
+1. **The 2-episode smoke test was a poor benchmark.** Episode 0 of the dev
+   subset has a ceiling of **0%** -- the detector never fires on any of its 7
+   goals from 48 poses each -- and those 7 subtasks were 7 of the 17 being
+   iterated against. Some recent tuning was measured against noise. Future
+   smoke tests should be drawn from episodes with a non-zero ceiling.
+2. **The detector does not excuse the result.** 59.2% being winnable means
+   SR = 0% still reflects genuine navigation gaps. Report SR against the
+   achievable subset as well as the raw total, and do not present the ceiling
+   as an explanation for everything.
+
 #### Categories at risk (for the report's error analysis)
 
 From a 12-scene val census, these GOAT categories had **zero** instances even
