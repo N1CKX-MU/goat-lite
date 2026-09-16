@@ -2334,3 +2334,67 @@ very rare — `boiler`, `calendar`, `christmas tree`, `footrest`, `freezer` and
 `photo` had one instance each. Expect poor detector recall on these and say so
 explicitly in the write-up, rather than letting it read as a general failure.
 Per-category counts are saved to `logs/category_census.json`.
+
+### 2026-09-16 — The stop decision, isolated on the 3050 laptop
+
+#### 6.33 The visualiser could not write video on the minival scenes
+
+`scripts/debug_episode.py` failed before producing a frame:
+
+```
+[libx264] height not divisible by 2 (820x517)
+BrokenPipeError: [Errno 32] Broken pipe
+```
+
+and, with the parity corrected, `imageio` rejected the run outright: *"All
+images in a movie should have same size"*.
+
+`render_topdown` crops the grid to the explored region, squares that crop only
+as far as the grid bounds allow, then scales the longer side to `out_size`. Near
+a map edge the crop stays oblong, so the canvas came back **520x517** rather
+than the 520x520 its docstring promises -- and because the crop follows
+exploration, the size changed from step to step.
+
+It now letterboxes onto a fixed `out_size x out_size` canvas filled with
+`C_UNKNOWN`, so the padding reads as unexplored space. Padding happens *after*
+all drawing, so `to_px` coordinates are unaffected, and the map is not resized
+-- resizing would distort the success-radius circles.
+
+Worth noting for the next environment-specific bug: this never appeared on the
+other machine. It is scene-dependent, not machine-dependent, and the scenes
+differ per split.
+
+#### 6.34 Memory was accurate; only the stop decision failed
+
+The first trace run on the minival episodes, `--episode 24 --subtask 2`
+(`category/mirror`, 1 valid instance, 250 steps):
+
+| | |
+|---|---|
+| **MATCH ERROR** (matched node vs true instance) | **0.15 m** |
+| closest approach to the true goal | **0.19 m** at step 36 |
+| success radius | 1.00 m |
+| state on arrival | VERIFYING |
+| `goal_in_view` | **False**, for the whole subtask |
+| outcome | timeout, 0.40 m away |
+
+This is the cleanest evidence so far that the failure is **not** perception,
+memory or navigation. Memory placed the mirror to within 0.15 m; A* and pure
+pursuit drove the agent to within 0.19 m of it. What failed is the last
+decision: the first-person view at that moment is a flat wall. The agent
+approaches the *node position*, which for a wall-mounted category sits on the
+wall, so it arrives nose-to-surface with the object out of frame, and
+`_goal_in_view` can never fire.
+
+`_approach_cell()` (6.29) already plans to a free cell within `success_distance`
+rather than onto the object, so the goal is reachable -- but nothing then turns
+the agent to *face* the object, and VERIFYING keeps issuing FWD while inside the
+radius. The remaining work is a bearing check: on arrival, turn toward the
+matched node until it is in frame, and only then decide.
+
+Counterpoint worth keeping: on the same episode's `category/picture` subtasks
+(19/0, 19/5) the agent stopped 3.72 m out or never approached at all, with 25
+valid instances in the scene. So the wrong-instance failure of 6.30 has not gone
+away -- 6.34 isolates one failure mode, it does not replace the other.
+
+Reproduction and the six locally runnable episodes are recorded in `docs/DEMO.md`.
