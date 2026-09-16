@@ -80,31 +80,27 @@ mirror leaves the frame, and `goal_in_view` never becomes true.
 
 ## 4. Robot tour — Stretch on a chase camera (2 min)
 
-Needs Bullet physics, which the `goat` env does **not** have
-(`habitat-sim-mutex ... headless_nobullet`). Use the `goat-bullet` env, a clone
-of `goat` with the matching bullet build of the same habitat-sim commit:
+Needs Bullet physics. `goat` now carries the bullet build, so no separate env:
 
 ```bash
-conda activate goat-bullet
 python -u scripts/robot_tour.py --scene-dirs 00809-Qpor2mEya8F --seconds 12 \
     --out outputs/demo_robot_tour.mp4
 ```
 
-Both envs are otherwise identical (numpy 1.26.4, torch 2.6.0+cu124, ultralytics
-8.4.117) and the suite passes in both. `goat` stays the environment of record
-for anything measured; `goat-bullet` exists for this demo.
-
-To rebuild the clone from scratch:
+The env originally shipped `habitat-sim-mutex 1.0 headless_nobullet`, which
+raises `ESP_CHECK failed: Physics has been enabled ... not built with Bullet
+support`. Swapped in place, tested first in a throwaway clone:
 
 ```bash
-conda create --name goat-bullet --clone goat
-conda activate goat-bullet
 conda install -c aihabitat -c conda-forge \
   habitat-sim=0.3.1=py3.9_headless_bullet_linux_3d6d67d6deae4ab2472cc84df7a3cef1503f606d
 ```
 
-Pin the full build string. A bare `habitat-sim withbullet` resolves to 0.3.3,
-which is a different simulator from the one every measurement so far used.
+Pin the full build string. A bare `habitat-sim withbullet` resolves to 0.3.3, a
+different simulator from the one behind every measurement so far. The pinned
+build is the same version *and source hash* as before, so only Bullet changed:
+numpy 1.26.4, torch 2.6.0+cu124 and ultralytics 8.4.117 are untouched and all
+166 tests still pass.
 
 ## What does not run here
 
