@@ -180,6 +180,16 @@ def render_topdown(
     cv2.line(canvas, ap, tip, C_HEADING, 2, cv2.LINE_AA)
     cv2.circle(canvas, ap, 5, C_AGENT, -1, cv2.LINE_AA)
 
+    # The crop is squared only where the grid allows it, so near a map edge the
+    # view stays oblong and the canvas comes back smaller than out_size on one
+    # axis -- and it changes size as exploration grows. A video writer needs a
+    # constant frame size, so letterbox onto a fixed out_size x out_size canvas.
+    if canvas.shape[0] != out_size or canvas.shape[1] != out_size:
+        fixed = np.full((out_size, out_size, 3), C_UNKNOWN, dtype=np.uint8)
+        h, w = canvas.shape[:2]
+        fixed[:h, :w] = canvas[:out_size, :out_size]
+        canvas = fixed
+
     return canvas
 
 
@@ -212,7 +222,15 @@ def compose_frame(topdown, fpv, lines, width_pad: int = 300):
                     0.42, C_TEXT, 1, cv2.LINE_AA)
         y += 20
 
-    return np.hstack([topdown, panel])
+    out = np.hstack([topdown, panel])
+
+    # libx264 rejects odd dimensions, and the top-down height follows the
+    # scene's aspect ratio, so it lands odd for some scenes (820x517 on
+    # ep19/y9hTuugGdiq). Pad rather than crop: cropping would clip the map.
+    pad_h, pad_w = out.shape[0] % 2, out.shape[1] % 2
+    if pad_h or pad_w:
+        out = np.pad(out, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+    return out
 
 
 def legend_lines() -> list[str]:
