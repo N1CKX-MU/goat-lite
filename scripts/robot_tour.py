@@ -170,8 +170,13 @@ def tour_scene(scene_dir, seconds, fps, writer, rng, det):
 
     ao = sim.get_articulated_object_manager().add_articulated_object_from_urdf(
         "data/robots/hab_stretch/urdf/hab_stretch.urdf", fixed_base=True)
-    # URDF origin sits above the wheel bottoms; lift so the lowest point meets the floor
-    foot = -float(ao.aabb.min[1])
+    # URDF origin sits above the wheel bottoms; lift so the lowest point meets the floor.
+    # ArticulatedObject.aabb only exists on newer habitat-sim; 0.3.1's bullet build
+    # has no such attribute, so fall back to the root node's cumulative bounds.
+    if hasattr(ao, "aabb"):
+        foot = -float(ao.aabb.min[1])
+    else:
+        foot = -float(ao.root_scene_node.cumulative_bb.min[1])
     parked = mn.Vector3(0.0, -50.0, 0.0)
 
     lo, hi = pf.get_bounds()
