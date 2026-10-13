@@ -29,6 +29,17 @@ class SubtaskResult:
     shortest_path_length: float
     reason: str  # "success", "timeout", "wrong_stop", "no_plan"
     wall_time_s: float = 0.0
+    # ── Diagnostics. None of these affect scoring; they exist to split the
+    # dominant failure bucket. After the stop decision was fixed, most failures
+    # became "timed out more than 3 m away", which is three different problems
+    # wearing one label: never found a candidate, found the wrong one, or found
+    # the right one and ran out of steps. These separate them.
+    ever_matched: bool = False      # did the matcher ever return a node?
+    node_error_m: float = float("nan")  # final matched node to nearest true instance
+    steps_searching: int = 0
+    steps_approaching: int = 0
+    steps_verifying: int = 0
+    explored_m2: float = 0.0        # floor area the map had explored at the end
     # Did the agent's own detector also fire on the goal class in the final
     # frame? Not part of the success criterion -- success uses the benchmark's
     # geometric visibility test -- but recorded so the stricter
@@ -170,11 +181,19 @@ def run_episode(
         prev_gps = env.get_gps().copy()
         steps = 0
         done = False
+        state_steps: dict[str, int] = {}
+        ever_matched = False
 
         for step in range(max_steps_per_subtask):
             obs = env._make_obs()
             action = agent.act(obs)
             steps += 1
+
+            # Where the step budget actually went, and whether the matcher ever
+            # produced anything to go to.
+            state_name = getattr(getattr(agent, "state", None), "value", "")
+            state_steps[state_name] = state_steps.get(state_name, 0) + 1
+            ever_matched = ever_matched or getattr(agent, "_matched_node", None) is not None
 
             if action == 0:
                 done = True
@@ -248,6 +267,27 @@ def run_episode(
 
         spl = compute_spl(success, shortest_path, actual_path)
 
+        # How far the node the agent finally believed in was from a real
+        # instance. Small with a failure means the stop rule; large means the
+        # matcher committed to the wrong object.
+        node_error = float("nan")
+        matched = getattr(agent, "_matched_node", None)
+        if matched is not None and goal_positions:
+            mp = np.asarray(matched.world_xyz)
+            node_error = min(
+                float(np.sqrt((mp[0] - p[0]) ** 2 + (mp[2] - p[2]) ** 2))
+                for p in goal_positions
+            )
+
+        explored_m2 = 0.0
+        smap = getattr(agent, "semantic_map", None)
+        if smap is not None:
+            try:
+                res = smap._resolution
+                explored_m2 = float(smap.get_explored().sum()) * res * res
+            except Exception:
+                pass
+
         # Determine failure reason
         if success:
             reason = "success"
@@ -272,6 +312,12 @@ def run_episode(
             reason=reason,
             wall_time_s=wall_time,
             detector_in_view=detector_in_view,
+            ever_matched=ever_matched,
+            node_error_m=node_error,
+            steps_searching=state_steps.get("searching", 0),
+            steps_approaching=state_steps.get("approaching", 0),
+            steps_verifying=state_steps.get("verifying", 0),
+            explored_m2=explored_m2,
         ))
 
     return results

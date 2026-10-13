@@ -48,6 +48,15 @@ def _load(results_dir: str) -> list[dict]:
         r["subtask_index"] = int(r["subtask_index"])
         r["distance_to_goal"] = float(r["distance_to_goal"])
         r["actual_path_length"] = float(r["actual_path_length"])
+        # Diagnostics, absent from runs made before they were added.
+        if "ever_matched" in r:
+            r["ever_matched"] = r["ever_matched"] == "True"
+        for k in ("node_error_m", "explored_m2"):
+            if k in r:
+                r[k] = float(r[k]) if r[k] not in ("", "nan") else float("nan")
+        for k in ("steps_searching", "steps_approaching", "steps_verifying"):
+            if k in r:
+                r[k] = int(r[k])
     return rows
 
 
@@ -75,6 +84,56 @@ def _bucket(r: dict) -> str:
     if d <= 3.0:
         return "timed out just short (1-3 m)"
     return "timed out far away (>3 m)"
+
+
+def _diagnosis(rows: list[dict]) -> str:
+    """Split the failures by what the agent actually believed.
+
+    "Timed out far away" is three different problems wearing one label. The
+    matcher either never produced a candidate (perception or exploration), or
+    produced one that was not the goal (matcher precision), or produced the
+    right one and the agent still did not finish (stop rule or step budget).
+    """
+    fails = [r for r in rows if not r["success"]]
+    buckets = Counter()
+    for r in fails:
+        if not r["ever_matched"]:
+            buckets["never matched any candidate"] += 1
+            continue
+        e = r["node_error_m"]
+        if e != e:  # nan: matched at some point, nothing held at the end
+            buckets["matched, then dropped the candidate"] += 1
+        elif e <= 1.0:
+            buckets["candidate was the goal (stop rule or budget)"] += 1
+        elif e <= 3.0:
+            buckets["candidate near the goal (1-3 m localisation error)"] += 1
+        else:
+            buckets["committed to the wrong object (>3 m)"] += 1
+
+    n = max(len(fails), 1)
+    out = _table(
+        "Why the failures failed", ("diagnosis", "n", "share of failures"),
+        [(k, v, f"{100.0 * v / n:.1f}%") for k, v in buckets.most_common()],
+    )
+
+    def _med(key):
+        vals = [r[key] for r in rows if key in r]
+        return median(vals) if vals else float("nan")
+
+    total = _med("steps_searching") + _med("steps_approaching") + _med("steps_verifying")
+    out += _table(
+        "Where the step budget went (median per subtask)",
+        ("state", "steps", "share"),
+        [(s_, f"{_med('steps_' + s_):.0f}",
+          f"{100.0 * _med('steps_' + s_) / max(total, 1):.0f}%")
+         for s_ in ("searching", "approaching", "verifying")],
+    )
+    out += (f"\nMedian floor area explored by the end: "
+            f"**{_med('explored_m2'):.1f} m2**. For scale, the 22 dev-subset "
+            f"scenes have a median navigable area of 88.9 m2 (max 291.8), and "
+            f"500 steps buys at most 125 m of travel -- less once turning is "
+            f"paid for.\n")
+    return out
 
 
 def _table(title: str, header: tuple, rows: list[tuple]) -> str:
@@ -145,6 +204,9 @@ def report(results_dir: str) -> str:
         [(k, v, f"{100.0 * v / max(n, 1):.1f}%")
          for k, v in buckets.most_common()],
     ))
+
+    if "ever_matched" in rows[0]:
+        out.append(_diagnosis(rows))
 
     by_cat = _group(rows, "category")
     by_cat.sort(key=lambda t: (-t[1], t[0]))
