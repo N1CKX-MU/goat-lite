@@ -2748,3 +2748,56 @@ image.
    detector is nearly blind below 0.8 m as well. Both argue for approaching a
    pose near the **outer** edge of the success radius rather than the inner.
    That is the next agent change, and it is now quantified rather than guessed.
+
+#### 6.43 Image goals were decided by proximity, with the picture unused
+
+An image subtask hands the agent a photograph of **one** instance and credits
+only that instance. `GoalMatcher.match` routed `image` straight into
+`_match_category`, i.e. the *nearest* remembered instance of the category, and
+never touched the picture.
+
+Measured over the dev subset, instances of the goal category present in the
+scene:
+
+| modality | n | median instances | with >1 instance |
+|---|---|---|---|
+| category | 81 | 4 | 58 (72%) |
+| language | 70 | 2 | 47 (67%) |
+| image | 67 | 2 (max 47) | 41 (61%) |
+
+So the referenced instance was being selected with an expected probability of
+**0.58** for image goals and 0.49 for language. Image is 67 of 218 dev
+subtasks, which caps image SR near 25% before any other limit applies. This is
+why PLAN.md Section 7.13's "Stretch A" is reclassified as required.
+
+**Both sides of the comparison must come from the same distribution.** Node
+embeddings are CLIP over *detector crops*. Embedding the whole goal frame would
+compare a tight object crop against a view in which the object covers about a
+third of the frame (`frame_coverage` ~0.35, `object_coverage` ~0.89).
+`PerceptionPipeline.embed_goal_image()` therefore runs the detector on the goal
+view and crops its best box of the goal class, making both sides identical by
+construction. When the detector does not fire on the goal class in the goal's
+own picture, there is nothing honest to compare and the matcher falls back to
+category matching.
+
+**Two things worth verifying before trusting any of it**, both checked directly
+against the simulator rather than assumed:
+
+1. `image_goals` entries are **sensor** poses, not agent poses. In the first val
+   shard an image goal sits at `y = +0.58` while the matching agent viewpoint
+   sits at `y = -0.58`, about 1.17 m lower; setting the agent base to a sensor
+   pose would render the goal from 1.41 m too high. The fix sets the sensor
+   states directly with `infer_sensor_states=False`, which only works if
+   mutating `AgentState.sensor_states` survives the round trip through pybind11
+   -- it does: requesting a camera translation of `(+2.0, +0.5, -1.0)` moved
+   `get_pose()` to exactly the requested position.
+2. The rotation parses with `quaternion_from_coeffs`, not
+   `from_float_array` (6.16). Checked on the best-framed image goal: the
+   resulting camera "up" is `[0.087, 0.971, 0.224]`, i.e. upright with a little
+   pitch, which is what a hand-picked view of an object should look like.
+
+`image_threshold` defaults to **-1.0**, the minimum a cosine can take, so the
+matcher ranks by appearance and never rejects -- it cannot regress the previous
+behaviour. 0.0 is *not* the neutral value: two unrelated CLIP embeddings score
+around zero and land either side of it, so a 0.0 threshold silently discarded
+about half of the single-candidate cases. The exclusion test caught that.
