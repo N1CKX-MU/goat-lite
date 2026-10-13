@@ -2441,3 +2441,251 @@ valid instances in the scene. So the wrong-instance failure of 6.30 has not gone
 away -- 6.34 isolates one failure mode, it does not replace the other.
 
 Reproduction and the six locally runnable episodes are recorded in `docs/DEMO.md`.
+
+### 2026-10-13 — A success criterion the agent could not meet
+
+The headline: **the first scored successes in the project.** Four defects, three
+in the agent and one in the scorer, each of which independently prevented any
+subtask from ever being credited. They are recorded in the order they were
+found, because the order is the argument: the scorer had to be understood before
+the agent's stop logic could be judged.
+
+#### 6.35 The detector is nearly blind at the distance success requires
+
+Before tuning the stop decision on episode 24 subtask 2 -- the trace from 6.34,
+which reached 0.19 m from a mirror with `goal_in_view` False for all 250 steps
+-- the subtask was checked for winnability, per the warning in 6.32 about
+iterating against noise. The probe parks the agent on a ring of navigable poses
+facing the instance and asks the detector directly, as `detector_ceiling.py`
+does, but at five radii instead of three.
+
+Episode 24, 8 angles per radius, hits / poses tried:
+
+| subtask | goal | 0.5 m | 0.8 m | 1.2 m | 1.5 m | 2.5 m | best conf |
+|---|---|---|---|---|---|---|---|
+| 0 | language/pillow | 0/8 | 0/8 | 0/8 | 2/8 | 1/8 | 0.23 |
+| 1 | language/picture | 2/8 | 2/8 | 2/8 | 4/8 | 1/8 | 0.64 |
+| 2 | category/mirror | 0/8 | 0/8 | 1/8 | 1/8 | 0/8 | 0.22 |
+| 3 | category/refrigerator | 0/8 | 0/8 | 0/8 | 0/8 | 0/8 | — |
+| 4 | category/microwave | 0/8 | 0/8 | 2/8 | 2/8 | 0/7 | 0.55 |
+| 8 | category/pillow | 2/16 | 3/16 | 4/16 | 9/16 | 13/15 | 0.93 |
+
+Aggregated over the episode: **0.5 m 7%, 0.8 m 9%, 1.2 m 20%, 1.5 m 34%,
+2.5 m 28%**. Detection probability climbs steeply out to about 1.5 m and then
+falls away.
+
+The success criterion requires a stop **within 1.0 m**. So the agent is required
+to be standing exactly where its detector does not work. At 0.5-0.8 m the
+detector fires on roughly one pose in twelve: an object that fills the frame
+with untextured surface and no context does not look like the training data,
+which was rendered from ordinary room-scale viewpoints.
+
+This is not a property of the scenes. The episode files carry GOAT-Bench's own
+`view_points` -- 30 per goal, each an agent state with an IoU describing how
+well the object is framed. Over all 1246 annotated goals in `val_unseen`,
+26714 viewpoints:
+
+| | |
+|---|---|
+| viewpoint to object, median | 1.10 m (p25 0.84, p75 1.51) |
+| viewpoints inside 1.0 m | 38.7% |
+| goals with at least one viewpoint inside 1.0 m | **90.0%** |
+| nearest viewpoint per goal, median | 0.59 m |
+| best-framed (highest IoU) viewpoint, median | 0.70 m |
+
+The benchmark's own notion of a good viewing pose is therefore comfortably
+compatible with a 1.0 m stop. The conflict is between the **detector's working
+range** and the criterion, not between the criterion and the dataset.
+
+Consequence for the report: the 59.2% ceiling of 6.32 is measured over radii
+{0.8, 1.5, 2.5} m, and two of those three lie **outside** the success radius.
+It is an upper bound on "the detector can see this object from somewhere", not
+on "the detector can see it from a pose that would score". The in-radius
+ceiling is the number that actually bounds SR and it has not yet been measured
+at dev-subset scale.
+
+#### 6.36 The scorer asked the agent's own detector whether the goal was visible
+
+`runner.py` implemented the second half of the success criterion like this:
+
+```python
+detections = agent.perception.process(final_obs, step=steps)
+goal_in_view = any(d.cls_name == subtask.category for d in detections)
+```
+
+PLAN.md Section 8 defines success as GOAT-Bench does: STOP within 1.0 m of a
+valid instance, **and that instance within the agent's field of view**. Being
+in the field of view is a geometric property of the scene and the camera. The
+code substituted the agent's own YOLO for that geometry, which is wrong on
+three counts:
+
+1. GOAT-Bench has no access to the agent's internals, so this cannot be its
+   definition -- and the dataset ships the viewpoints that are.
+2. It makes SR a function of detector recall **twice**: once to find the goal,
+   again to be credited with reaching it. The number is then not comparable
+   with published GOAT results, which is the whole point of the comparison.
+3. By 6.35 it is measurably unsatisfiable in the band the criterion forces the
+   agent into, rejecting a geometrically perfect arrival about nine times in
+   ten.
+
+`instance_in_view()` in `src/eval/metrics.py` replaces it: transform the
+ground-truth centroid into the camera frame, require it in front and inside the
+image, then test occlusion against the depth buffer. Depth rather than a
+semantic mask because the local HM3D val scenes ship **no semantic assets**
+(only `.basis.glb` and `.basis.navmesh`), which is a stated limitation --
+downloading `hm3d-val-semantic-annots` would allow the faithful test.
+
+The occlusion tolerance needs care in both directions. The instance position is
+a centroid, so the object's own surface renders *nearer* than the centroid --
+by up to its half-depth -- and a naive "is the depth at this pixel equal to the
+range" test would reject every large object. The test allows the nearest
+visible surface to sit up to `max(0.5 * range, range - 1.0)` in front of the
+centroid. A wall still fails comfortably: the case that motivated it is a
+wall-mounted goal approached from the next room, 0.9 m from the centroid with
+the wall rendering at 0.1 m.
+
+Two further corrections in the same path:
+
+- Success is granted if **any** valid instance is both inside the radius and
+  visible. Testing only the nearest one fails a stop that has a second valid
+  instance of the category squarely in frame, and the dev subset has a median
+  of 4 instances of a goal category per scene (72% of category subtasks have
+  more than one).
+- The detector's answer is still computed, recorded as `detector_in_view`, and
+  aggregated into `sr_detector_agrees`. The stricter reading -- navigated there
+  **and** recognised it -- remains reportable rather than being lost. Report
+  both.
+
+#### 6.37 VERIFYING drove into the goal, and then livelocked
+
+Three defects in eight lines of the FSM.
+
+**It drove forward.** VERIFYING returned action 1 while the agent was already
+inside the success radius. That is what put the agent nose-to-surface against
+the wall a mirror hangs on, pushing the object out of frame -- the 0.19 m
+arrival of 6.34. Nothing in the state ever turned the agent to *face* what it
+had matched.
+
+**The budget could not have worked anyway.** Verification gave up after 5
+steps. One turn is 30 degrees, so 5 steps cannot bring a goal more than 150
+degrees off-axis into frame: a goal behind the agent was unconfirmable however
+long the subtask ran.
+
+**Expiry was a livelock.** On expiry the FSM reverted to APPROACHING -- while
+still within `success_distance`, so the APPROACHING block re-entered VERIFYING
+on the very next tick with the counter reset. Measured on a synthetic arrival:
+**32 of 40 ticks** spent re-verifying the same node. This is the 500-step
+timeout seen on every traced subtask that actually reached its goal, and it is
+why 6.34's trace shows VERIFYING on arrival and a timeout 250 steps later.
+
+VERIFYING now: stop if the detector fires (unchanged, strongest evidence);
+else turn the short way toward the matched node until it is within 30 degrees
+of the camera axis (the horizontal FOV is 90); then **commit**.
+
+Committing without a fresh detection is the deliberate consequence of 6.35.
+Inside the success radius the detector is nearly blind, so waiting for it
+discards almost every correct arrival. The decision rests instead on
+accumulated instance memory, which was built at the distances where the
+detector does work. Holding still to look again buys nothing: the detector is
+deterministic, so an unchanged pose yields the same frame and the same answer.
+
+If a full 360-degree survey never brings the node into frame, the node is
+rejected for the rest of the subtask and the agent explores on. Rejections go
+through `GoalMatcher.match(exclude_ids=...)` rather than being filtered in the
+agent, so the second-best instance can win -- which matters given the median of
+4 instances per category per scene.
+
+Measured on episode 24 subtask 2, 250-step budget:
+
+| | before | after |
+|---|---|---|
+| outcome | timeout | **STOP at step 15** |
+| closest approach | 0.19 m | 0.91 m |
+| goal in view at stop | False | **True** |
+| scored | failure | **SUCCESS** |
+
+The closest approach moving *outward* is the fix working, not a regression: the
+agent no longer drives through its own viewing distance.
+
+#### 6.38 Memory had no way to be cleared, so it leaked across episodes
+
+`GoatAgent.reset(keep_memory=False)` was:
+
+```python
+if not keep_memory:
+    pass  # memory.clear() would go here if InstanceDatabase had a clear method
+```
+
+Neither `InstanceDatabase` nor `SemanticMap` had one, and `run_dev_eval.py`
+builds one agent per scene and loops that scene's episodes. Instance nodes and
+occupancy therefore survived from one episode into the next. Two consequences,
+both landing on the result the project exists to produce: the lifelong curve is
+defined *within* an episode, so inherited state confounds exactly that
+measurement; and the memory-on vs memory-off ablation -- "the big one for the
+report" in PLAN.md Section 7.10 -- could not be run at all, because memory
+could not be switched off.
+
+`clear()` on both, called through `getattr` since the subsystems are
+duck-typed. `InstanceDatabase.clear()` deliberately does **not** reset
+`_next_id`: the agent now tracks rejected nodes by id and the visualiser labels
+nodes by id, so a recycled id would quietly denote a different object.
+`SemanticMap.clear()` keeps size, resolution and origin -- re-deriving them
+would reintroduce the world-origin window that does not contain 18 of the 36
+val scenes.
+
+`run_episode(keep_memory_across_subtasks=...)` and `--no-memory` expose the
+ablation arm, writing to `outputs/dev_eval_<ts>_nomem`.
+
+#### 6.39 Memory had no mechanism for disbelief
+
+With the agent now committing to a stop on the strength of a remembered node,
+what gets into memory matters more than before. A node built from **one**
+detection at conf 0.15 was exactly as targetable as one seen fifty times.
+
+That is the mechanism behind the confident wrong stop of 6.30: `conf` was
+lowered from 0.35 to 0.15 (6.23) because at 0.35 the agent saw nothing in four
+frames out of five, and the price of that recall is false positives in memory.
+A *consistent* false positive also defeats re-detection, because the node
+carries the detector's own label -- the same wrong detection that created the
+node confirms it on arrival. Unlike the occupancy grid, which accumulates
+clamped evidence in both directions (6.22), memory had no way to disbelieve.
+
+`GoalMatcher` now returns only nodes with `n_observations >=
+min_observations` (default 2), with one escape hatch: a single sighting at
+confidence `>= trust_confidence` (default 0.5) also counts. Starving the
+matcher is its own failure mode on a recall-limited detector -- the 6.35 probe
+produced best confidences from 0.22 to 0.93, so a 0.9 hit seen once is real
+evidence while a 0.18 hit seen once is not. When nothing is eligible, `match()`
+returns None, which keeps the agent exploring.
+
+`min_observations` is a sweep axis, not a guess: `--min-observations` is
+exposed on `run_dev_eval.py` and {1, 2, 3} is planned on the dev subset.
+
+#### 6.40 The four traced subtasks after the fixes
+
+Same four subtasks as `docs/DEMO.md`, 250 steps each, scored exactly as the
+runner scores them:
+
+| episode / subtask | goal | instances | closest approach | outcome |
+|---|---|---|---|---|
+| **24 / 2** | category/mirror | 1 | **0.91 m** | **STOP at step 15 — SUCCESS** |
+| 19 / 0 | category/picture | 25 | 0.40 m, visible | timeout |
+| 19 / 5 | category/picture | 25 | 3.02 m | timeout |
+| 14 / 0 | category/decorative plant | 4 | 3.52 m | timeout |
+
+Episode 19 subtask 0 is worth its own note. The agent passed **0.40 m** from a
+valid picture, geometrically visible, at step 87 -- a scoring pose -- and did
+not stop, because it had no detection of that instance and so no node for it.
+With 25 valid instances in the scene, the agent is often near one it cannot
+see. That failure is not navigation and not the stop rule; it is detector
+recall at close range, i.e. 6.35 again, and it suggests the in-radius ceiling
+is the binding constraint on category goals with many instances.
+
+#### 6.41 The results CSV header would have crashed a multi-hour run
+
+`save_results()` wrote a hand-listed `fieldnames` while rows came from
+`asdict()`, so adding one field to `SubtaskResult` made `csv.DictWriter` raise
+on the extra key. Results are checkpointed after every scene, so this would
+have surfaced one scene into a three-hour run, with nothing saved. The header
+now comes from `dataclasses.fields()`, and a round-trip test asserts every
+field of the dataclass reaches the CSV.

@@ -52,31 +52,34 @@ subset, and any `--episode` above 1 fails with `IndexError`.
 
 ### Episodes that exist locally
 
-`data/hm3d` is the **minival** split (10 scenes). Only 4 val_unseen scenes are
-among them, so only these dev-subset indices run here:
+**All of them, as of 2026-10-13.** `data/hm3d` now points at the full HM3D val
+split (100 scene dirs), and every one of the 36 `val_unseen` scenes the
+benchmark references resolves on disk — verified by walking all 360 episodes
+through `_resolve_scene_path`. The 30-episode dev subset spans 22 scenes, all
+present. The earlier 10-scene minival restriction no longer applies.
 
-| `--episode` | scene | subtasks | notes |
-|---|---|---|---|
-| 11 | wcojb4TFT35 | 10 | mostly `christmas tree` — **0% detector ceiling, do not demo** |
-| 12 | y9hTuugGdiq | 5 | refrigerator, picture, rug |
-| 14 | k1cupFYWXJ6 | 10 | decorative plant, picture |
-| 19 | y9hTuugGdiq | 10 | picture, rug, mirror, refrigerator |
-| 24 | TEEsavR23oF | 9 | pillow, picture, mirror, refrigerator, microwave |
-| 29 | y9hTuugGdiq | 5 | refrigerator, rug |
+Measured 2026-10-13 after the stop-decision fixes (250 steps each, scored the
+same way `src/eval/runner.py` scores):
 
-Measured 2026-09-16 (250 steps each):
+| episode / subtask | goal | instances | closest approach | outcome |
+|---|---|---|---|---|
+| **24 / 2** | category/mirror | 1 | **0.91 m** | **STOP at step 15 — SUCCESS** |
+| 19 / 0 | category/picture | 25 | 0.40 m, visible | timeout |
+| 19 / 5 | category/picture | 25 | 3.02 m | timeout |
+| 14 / 0 | category/decorative plant | 4 | 3.52 m | timeout |
 
-| episode / subtask | goal | closest approach | outcome |
-|---|---|---|---|
-| **24 / 2** | category/mirror | **0.19 m** | reaches the goal, never confirms it — best demo |
-| 19 / 0 | category/picture | 3.20 m | stops at the wrong instance, 3.72 m out |
-| 19 / 5 | category/picture | 2.79 m | never approaches |
-| 14 / 0 | category/decorative plant | 3.52 m | never approaches |
+`24 / 2` is still the one to show, now as a success: the agent arrives at
+0.91 m, turns to face the mirror instead of driving into the wall it hangs on,
+and stops. The panel shows both predicates — `goal in view (GT)`, which is what
+the scorer checks, and `detector fired`, which is what the agent's YOLO says.
+They disagree often, and that gap is the subject of engineering-log 6.35.
 
-`24 / 2` is the one to show: `MATCH ERROR 0.15 m` (memory has the mirror almost
-exactly right), `dist to TRUE goal 0.19 m`, state `VERIFYING`, and a
-first-person view flat against the wall — the agent drives onto the node, the
-mirror leaves the frame, and `goal_in_view` never becomes true.
+For contrast, `19 / 0` shows the remaining failure: the agent passes 0.40 m from
+a valid picture that is geometrically in view and does not stop, because the
+detector never fired on it and so memory holds no node for it.
+
+Episode 11 is still a poor demo — mostly `christmas tree`, a category with zero
+training boxes and a 0% detector ceiling.
 
 ## 4. Robot tour — Stretch on a chase camera (2 min)
 
@@ -102,10 +105,28 @@ build is the same version *and source hash* as before, so only Bullet changed:
 numpy 1.26.4, torch 2.6.0+cu124 and ultralytics 8.4.117 are untouched and all
 166 tests still pass.
 
+## 5. Full dev eval (hours)
+
+Runs here as of 2026-10-13, now that all 36 `val_unseen` scenes are on disk.
+218 subtasks over 22 scenes; budget 2–4 hours and use `python -u`.
+
+```bash
+python -u scripts/run_dev_eval.py --n-episodes 30 \
+    --output-dir outputs/dev_eval_memon
+
+# memory-off arm of the ablation: same episodes, memory and map cleared
+# before every subtask instead of carried across the episode
+python -u scripts/run_dev_eval.py --n-episodes 30 --no-memory
+```
+
+Results are checkpointed after every scene, so a crash costs at most one scene.
+`summary.json` reports SR and SPL by modality and by subtask index (the
+lifelong curve), plus `sr_detector_agrees` — the stricter reading where the
+agent's own detector also recognised the goal in the final frame.
+
 ## What does not run here
 
-- **A full dev eval** (`scripts/run_dev_eval.py --n-episodes 30`) — 24 of the
-  30 episodes reference val_unseen scenes that are not on this disk. Fix by
-  downloading `hm3d_val_habitat_v0.2` with
-  `python -m habitat_sim.utils.datasets_download` and repointing the
-  `data/hm3d` symlink at `scene_datasets/hm3d/val`.
+- **The semantic-sensor visibility test.** The local val scenes ship only
+  `.basis.glb` and `.basis.navmesh`, no `.semantic.glb`, so `instance_in_view`
+  tests occlusion against the depth buffer rather than a semantic mask. Fix by
+  downloading `hm3d-val-semantic-annots`.
