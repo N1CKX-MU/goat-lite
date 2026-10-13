@@ -2801,3 +2801,69 @@ matcher ranks by appearance and never rejects -- it cannot regress the previous
 behaviour. 0.0 is *not* the neutral value: two unrelated CLIP embeddings score
 around zero and land either side of it, so a 0.0 threshold silently discarded
 about half of the single-candidate cases. The exclusion test caught that.
+
+#### 6.44 The eval loop was dominated by one rescan-per-label loop
+
+The two dev-eval runs were tracking about **1.7 min per subtask** -- 218
+subtasks per arm, so roughly five hours each. Profiling the step loop (rather
+than assuming the detector or CLIP was the cost) put the blame on
+`find_frontiers`:
+
+| per call | |
+|---|---|
+| `find_frontiers` (old) | **233.5 ms** |
+| A* across the map | 35 ms |
+| full depth update | 8.8 ms |
+
+The cause was one loop:
+
+```python
+for label_id in range(1, n_labels + 1):
+    cells = np.argwhere(labeled == label_id)
+```
+
+Each iteration rescans the **whole** grid. A 29 m scene is 580x580 = 336k
+cells, and a partly explored map yields dozens of frontier fragments, so the
+cost is O(n_labels x grid). Exploration replans whenever the remaining path
+crosses a newly occupied cell, which while mapping a fresh scene is most steps,
+so this one loop dominated wall time. Note the shape of the mistake: it is not
+a wrong algorithm, it is a correct algorithm whose constant factor is the
+entire grid.
+
+Fixed in commit `7c64d73` by grouping the labelled cells with a single stable
+`argsort`. Measured on a synthetic 580x580 map with 33 frontiers: **45.9 ms ->
+10.2 ms**; on real maps, which fragment more, the reported gain was 233.5 ms ->
+6.9 ms.
+
+**Equivalence matters more than the speed here**, because the change was made
+with evaluations in flight: if the output is identical then the completed
+scenes remain valid and the runs can be *resumed* rather than restarted.
+`np.argwhere` returns indices in row-major order, and a stable sort by label
+preserves that order within each group, so the per-frontier `cells` arrays come
+out identical element for element -- and the pre-sort ordering of frontiers is
+the same, so the `sort(key=size, reverse=True)` that follows (Python's sort
+being stable) produces the same list even with ties.
+
+Verified independently rather than taken on trust: over 12 grids (random
+speckle, Gaussian-blob maps resembling real occupancy, an all-unknown grid and
+an all-free grid) x 3 `min_size` thresholds, every frontier's centroid, size and
+cell array matched the original implementation exactly.
+`tests/test_frontier.py` keeps the original implementation verbatim as a
+reference and asserts the same.
+
+**Operationally**: both arms were restarted from a worktree pinned at the
+behavioural commit with only this file and the harness overlaid, so the
+agent, matcher, memory, runner and metrics are bit-identical to the rows already
+on disk, and `--resume` (6.45) kept the 67 and 39 completed subtasks.
+
+#### 6.45 Resume is scene-granular on purpose
+
+A dev eval is hours and results were already checkpointed per scene;
+`--resume` reads the existing `results.csv` and skips scenes already complete.
+
+It deliberately will not resume *mid-episode*. Memory and the occupancy map
+persist across the subtasks of an episode, so replaying an episode from subtask
+5 would start it from state it never had, and the lifelong curve -- the whole
+point of the experiment -- is exactly the quantity that would be corrupted. A
+partially complete scene therefore has its rows discarded and the scene is
+redone whole.
