@@ -250,3 +250,43 @@ class TestMemorySize:
         total_bytes = embed_bytes + thumb_bytes
         total_mb = total_bytes / (1024 * 1024)
         assert total_mb < 20, f"Memory {total_mb:.1f} MB exceeds 20 MB budget"
+
+
+class TestClear:
+    """The database had no clear(), so GoatAgent.reset(keep_memory=False) was a
+    documented no-op (`pass  # memory.clear() would go here`). The agent is
+    built once per scene, so memory and map leaked across every episode in that
+    scene -- which confounds the lifelong curve and makes the memory on/off
+    ablation unimplementable."""
+
+    def test_clear_empties_the_database(self):
+        db = InstanceDatabase()
+        db.update([_make_pi(cls_name="chair", world_xyz=(1.0, 0.5, 1.0))], step=0)
+        db.update([_make_pi(cls_name="table", world_xyz=(4.0, 0.5, 4.0))], step=1)
+        assert len(db.all_nodes()) == 2
+
+        db.clear()
+        assert db.all_nodes() == []
+        assert db.query_by_class_name("chair") == []
+        assert db.query_by_embedding(_make_embed(0)) == []
+
+    def test_clear_does_not_recycle_node_ids(self):
+        """Ids must stay unique for the life of the database: the agent carries
+        rejected node ids, and the visualiser labels nodes by id, so a reused
+        id would silently refer to a different object."""
+        db = InstanceDatabase()
+        db.update([_make_pi(world_xyz=(1.0, 0.5, 1.0))], step=0)
+        first_id = db.all_nodes()[0].node_id
+
+        db.clear()
+        db.update([_make_pi(world_xyz=(9.0, 0.5, 9.0))], step=1)
+        assert db.all_nodes()[0].node_id != first_id
+
+    def test_database_is_usable_after_clear(self):
+        db = InstanceDatabase()
+        db.update([_make_pi(world_xyz=(1.0, 0.5, 1.0))], step=0)
+        db.clear()
+        db.update([_make_pi(world_xyz=(1.0, 0.5, 1.0))], step=1)
+        db.update([_make_pi(world_xyz=(1.05, 0.5, 1.0))], step=2)
+        assert len(db.all_nodes()) == 1
+        assert db.all_nodes()[0].n_observations == 2

@@ -100,6 +100,7 @@ def run_episode(
     agent,
     episode: EpisodeSpec,
     max_steps_per_subtask: int = 500,
+    keep_memory_across_subtasks: bool = True,
 ) -> list[SubtaskResult]:
     """Run a full multi-subtask episode.
 
@@ -108,6 +109,11 @@ def run_episode(
         agent: GoatAgent instance.
         episode: episode specification with subtasks.
         max_steps_per_subtask: hard step limit per subtask.
+        keep_memory_across_subtasks: carry instance memory and the occupancy
+            map from one subtask to the next, which is the lifelong behaviour
+            under test. Setting it False is the memory-off arm of the ablation
+            in PLAN.md Section 7.10: every subtask starts from nothing, on the
+            same episodes, so the delta isolates what persistent memory buys.
 
     Returns:
         List of SubtaskResult, one per subtask.
@@ -134,7 +140,7 @@ def run_episode(
 
         # Reset agent (keep memory from previous subtasks)
         obs = env._make_obs()
-        keep_memory = (i > 0)
+        keep_memory = keep_memory_across_subtasks and (i > 0)
         agent.reset(obs, keep_memory=keep_memory)
 
         # Score against every instance that counts as this goal. Category

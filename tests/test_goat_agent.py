@@ -51,8 +51,12 @@ class FakeMemory:
     def __init__(self, nodes=None):
         self._nodes = nodes or []
         self.update_calls = 0
+        self.clear_calls = 0
     def update(self, perceived, step):
         self.update_calls += 1
+    def clear(self):
+        self.clear_calls += 1
+        self._nodes = []
     def all_nodes(self):
         return list(self._nodes)
     def query_by_class(self, cls_id):
@@ -82,6 +86,9 @@ class FakeMap:
         self._gs = grid_size
         self._occ = np.zeros((grid_size, grid_size), dtype=np.int8)
         self._explored = np.zeros((grid_size, grid_size), dtype=bool)
+        self.clear_calls = 0
+    def clear(self):
+        self.clear_calls += 1
     def update_from_depth(self, depth, pose, intrinsics):
         pass
     def update_from_detections(self, instances):
@@ -219,11 +226,17 @@ class TestDoneState:
         assert action == 0
 
     def test_reset_keep_memory(self):
-        """Reset with keep_memory=True should preserve memory but change state."""
-        memory = FakeMemory(nodes=[_make_node()])
+        """Reset with keep_memory=True should preserve memory but change state.
+
+        Sequenced as the eval runs it: subtask 0 resets WITHOUT keep_memory (and
+        so clears), the subtask then populates memory, and subtask 1 resets WITH
+        keep_memory and must inherit it.
+        """
+        memory = FakeMemory()
         agent = _make_agent(memory=memory)
         agent.reset(_make_obs())
         agent.act(_make_obs())
+        memory._nodes = [_make_node()]
 
         agent.reset(_make_obs(), keep_memory=True)
         assert agent.state == AgentState.SEARCHING
@@ -358,3 +371,39 @@ class TestVerification:
         agent.reset(_make_obs(gps=(0.0, 0.0)), keep_memory=True)
         agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
         assert node.node_id not in matcher.last_exclude
+
+
+class TestMemoryLifecycle:
+    """reset(keep_memory=False) was `pass  # memory.clear() would go here`.
+    The eval builds one agent per scene, so memory and map survived from one
+    episode into the next -- the lifelong curve measures within an episode, so
+    a leak across episodes confounds exactly the headline result, and the
+    memory on/off ablation could not be run at all."""
+
+    def test_reset_without_keep_memory_clears_memory_and_map(self):
+        memory, smap = FakeMemory(nodes=[_make_node()]), FakeMap()
+        agent = _make_agent(memory=memory, semantic_map=smap)
+        agent.reset(_make_obs(), keep_memory=False)
+        assert memory.clear_calls == 1
+        assert smap.clear_calls == 1
+        assert memory.all_nodes() == []
+
+    def test_reset_with_keep_memory_preserves_both(self):
+        memory, smap = FakeMemory(nodes=[_make_node()]), FakeMap()
+        agent = _make_agent(memory=memory, semantic_map=smap)
+        agent.reset(_make_obs(), keep_memory=True)
+        assert memory.clear_calls == 0
+        assert smap.clear_calls == 0
+        assert len(memory.all_nodes()) == 1
+
+    def test_missing_clear_is_tolerated(self):
+        """Duck-typed subsystems: a memory or map without clear() must not
+        crash the reset path."""
+        class Bare:
+            def update(self, perceived, step): pass
+            def all_nodes(self): return []
+            def query_by_class_name(self, name): return []
+
+        agent = _make_agent(memory=Bare())
+        agent.reset(_make_obs(), keep_memory=False)
+        assert agent.state == AgentState.SEARCHING

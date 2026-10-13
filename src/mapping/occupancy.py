@@ -121,6 +121,20 @@ class SemanticMap:
             (self._grid_size, self._grid_size), dtype=np.int16
         )
 
+    def clear(self) -> None:
+        """Forget everything mapped, keeping the grid's geometry.
+
+        Size, resolution and origin survive: the grid is sized and centred on
+        the scene bounds, and measured over the 36 val scenes 18 do not fit a
+        default window on the world origin, so re-deriving them here would
+        strand half the val set in permanently unknown space.
+        """
+        self._occupancy.fill(-1)
+        self._explored.fill(False)
+        self._class_counts.fill(0)
+        self._log_odds.fill(0)
+        self._dropped_cls_ids.clear()
+
     # ── Public accessors ──
 
     def get_occupancy(self) -> np.ndarray:

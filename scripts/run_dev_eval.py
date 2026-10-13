@@ -79,12 +79,17 @@ def main():
     parser.add_argument("--hm3d-root", type=str, default="data/hm3d")
     parser.add_argument("--dataset-root", type=str,
                         default="data/datasets/goat_bench/hm3d/v1/val_unseen")
+    parser.add_argument("--no-memory", action="store_true",
+                        help="memory-off arm of the ablation: clear instance "
+                             "memory and the map before every subtask instead "
+                             "of carrying them across an episode")
     args = parser.parse_args()
 
     # Output directory with timestamp
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output_dir = f"outputs/dev_eval_{timestamp}"
+        suffix = "_nomem" if args.no_memory else ""
+        args.output_dir = f"outputs/dev_eval_{timestamp}{suffix}"
 
     print(f"Loading val_unseen episodes from {args.dataset_root}...")
     all_episodes = load_val_unseen(args.dataset_root)
@@ -124,7 +129,10 @@ def main():
             t0 = time.perf_counter()
 
             try:
-                results = run_episode(env, agent, ep)
+                results = run_episode(
+                    env, agent, ep,
+                    keep_memory_across_subtasks=not args.no_memory,
+                )
                 all_results.extend(results)
 
                 successes = sum(1 for r in results if r.success)

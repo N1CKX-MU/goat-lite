@@ -146,3 +146,4 @@ class TestWorldGridConversion:
         # 5m / 0.05 = 100 cells from origin
         assert ij[0] == 100
         assert ij[1] == 100
+

@@ -110,7 +110,17 @@ class GoatAgent:
         self._rejected_nodes = set()
 
         if not keep_memory:
-            pass  # memory.clear() would go here if InstanceDatabase had a clear method
+            # Memory and map persist across subtasks within an episode -- that
+            # is the lifelong property under test -- and are dropped between
+            # episodes. This used to be a no-op for want of a clear() method on
+            # either subsystem, so one agent per scene meant nodes and occupancy
+            # leaked from one episode into the next, confounding the very curve
+            # the experiment measures. Subsystems are duck-typed, so a fake
+            # without clear() must still reset cleanly.
+            for subsystem in (self.memory, self.semantic_map):
+                clear = getattr(subsystem, "clear", None)
+                if callable(clear):
+                    clear()
 
     def act(self, obs: Observation) -> int:
         """Run one sense-plan-act cycle. Returns action int: 0=stop, 1=fwd, 2=left, 3=right."""

@@ -34,6 +34,21 @@ class InstanceDatabase:
         self._nodes: list[InstanceNode] = []
         self._next_id: int = 0
 
+    def clear(self) -> None:
+        """Forget every instance.
+
+        Called by GoatAgent.reset(keep_memory=False) at the start of each
+        episode. Memory is meant to persist across subtasks WITHIN an episode
+        and not beyond it -- that is the window the lifelong curve measures.
+        Without this the agent, which is built once per scene, carried nodes
+        from one episode into the next.
+
+        ``_next_id`` deliberately does not reset: the agent tracks rejected
+        nodes by id and the visualiser labels them by id, so a recycled id
+        would quietly denote a different object.
+        """
+        self._nodes = []
+
     def all_nodes(self) -> list[InstanceNode]:
         return list(self._nodes)
 
