@@ -80,7 +80,10 @@ def build_agent(
 
 def main():
     parser = argparse.ArgumentParser(description="GOAT-Lite dev evaluation")
-    parser.add_argument("--n-episodes", type=int, default=30)
+    parser.add_argument("--n-episodes", type=int, default=30,
+                        help="size of the deterministic dev subset; 0 or a "
+                             "negative value means the WHOLE split, which is "
+                             "the final run reserved by PLAN.md Section 8")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
@@ -109,9 +112,17 @@ def main():
     all_episodes = load_val_unseen(args.dataset_root)
     print(f"  Total: {len(all_episodes)} episodes")
 
-    dev_episodes = sample_dev_subset(all_episodes, n=args.n_episodes, seed=args.seed)
+    if args.n_episodes and args.n_episodes > 0:
+        dev_episodes = sample_dev_subset(
+            all_episodes, n=args.n_episodes, seed=args.seed)
+        label = "Dev subset"
+    else:
+        # The full split. PLAN.md Section 8 reserves this for exactly one run
+        # on the locked configuration, so it is never the default.
+        dev_episodes = all_episodes
+        label = "FULL SPLIT"
     total_subtasks = sum(len(ep.subtasks) for ep in dev_episodes)
-    print(f"  Dev subset: {len(dev_episodes)} episodes, {total_subtasks} subtasks")
+    print(f"  {label}: {len(dev_episodes)} episodes, {total_subtasks} subtasks")
 
     # Group episodes by scene for efficiency (avoid reloading scenes)
     by_scene: dict[str, list] = {}
