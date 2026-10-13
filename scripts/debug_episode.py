@@ -30,6 +30,7 @@ from src.sim.goat_dataset import (
     quaternion_from_coeffs,
 )
 from src.eval.runner import _resolve_scene_path, _make_goal_spec
+from src.eval.metrics import instance_in_view, subtask_success
 from src.utils.viz import render_topdown, draw_detections, compose_frame, legend_lines
 from scripts.run_dev_eval import build_agent
 
@@ -131,10 +132,18 @@ def main() -> None:
         # diagnosable alongside what the matcher scored and what it rejected.
         _, match_score = agent.matcher.match(obs.current_goal, agent.memory, xy)
         goal_in_view = agent._goal_in_view(detections)
+        # What the SCORER checks: geometric visibility of a true instance, not
+        # whether the agent's own detector happened to fire. Reported side by
+        # side because the gap between them is the story of the stop decision.
+        cam_pose = env.get_pose()
+        gt_visible = any(
+            instance_in_view(np.asarray(g), cam_pose, env.intrinsics, obs.depth)
+            for g in goals
+        )
         seen = sorted({d.cls_name for d in detections})
         seen_classes = ",".join(seen)[:26] if seen else "-"
         if d_goal < closest:
-            closest, closest_step, closest_in_view = d_goal, step, goal_in_view
+            closest, closest_step, closest_in_view = d_goal, step, gt_visible
         candidates = agent.memory.query_by_class_name(sub.category)
         matched_err = float("nan")
         if agent._matched_node is not None and goals:
@@ -172,7 +181,8 @@ def main() -> None:
             # The two predicates that gate STOP. Being within the radius is not
             # enough: VERIFYING must fire (on distance to the NODE, not the true
             # goal) and the goal class must be detected in the current frame.
-            f"goal in view       {goal_in_view}",
+            f"goal in view (GT)  {gt_visible}",
+            f"detector fired     {goal_in_view}",
             f"detected classes   {seen_classes}",
             f"verify steps       {agent._verify_steps}",
             "",
@@ -210,7 +220,22 @@ def main() -> None:
           f"(success needs <= {agent.success_distance} m and the goal in view)")
     print(f"CLOSEST approach: {closest:.2f} m at step {closest_step}, "
           f"goal_in_view={closest_in_view}")
-    if closest <= agent.success_distance:
+
+    # Score the final pose exactly as src/eval/runner.py would.
+    final_obs = env._make_obs()
+    cam_pose = env.get_pose()
+    final_3d = np.array([final[0], float(env._agent.get_state().position[1]),
+                         final[1]])
+    scored = any(
+        subtask_success(
+            agent_pos=final_3d, goal_pos=np.asarray(g),
+            goal_in_view=instance_in_view(
+                np.asarray(g), cam_pose, env.intrinsics, final_obs.depth),
+        )
+        for g in goals
+    )
+    print(f"SCORED: {'SUCCESS' if scored else 'failure'}")
+    if not scored and closest <= agent.success_distance:
         print("  -> it WAS inside the success radius; failure is the stop "
               "condition, not navigation")
     print(f"wrote {args.out}/")

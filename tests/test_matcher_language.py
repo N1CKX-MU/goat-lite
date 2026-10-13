@@ -20,12 +20,18 @@ def _unit(v):
 
 
 class _Node:
-    def __init__(self, cls_name, embed, xyz=(0.0, 0.0, 0.0), conf=0.5):
+    def __init__(self, cls_name, embed, xyz=(0.0, 0.0, 0.0), conf=0.5,
+                 node_id=0, n_observations=1):
         self.cls_name = cls_name
         self.cls_id = 0
         self.clip_embed = _unit(embed)
         self.world_xyz = np.array(xyz, dtype=np.float64)
         self.confidence = conf
+        # The matcher gates on accumulated evidence, so a node stand-in has to
+        # carry it. conf defaults to the trust threshold, which keeps these
+        # tests about class restriction rather than about the gate.
+        self.node_id = node_id
+        self.n_observations = n_observations
 
 
 class _DB:

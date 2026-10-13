@@ -21,8 +21,8 @@ drives fp16 everywhere, 256×256 sensors, and the model choices.
   dated STATUS block for wherever work stands.
 - `TECHNICAL_GUIDE.md` — module-by-module walkthrough (§3), testing philosophy (§4), glossary (§5),
   and **§6 Engineering Log** — every defect found so far with the measurement that found it. Read
-  §6.16–6.27 before touching mapping, geometry, or navigation; §6.27 is an *open* regression, and
-  it lists what has already been ruled out so you don't re-investigate it.
+  §6.16–6.27 before touching mapping, geometry, or navigation — each lists what has already been
+  ruled out, by measurement, so you don't re-investigate it. §6.35 is the current frontier.
 - `TRAIN_YOLO.md` — the detector finetune pipeline, which runs on a *different* machine (the main
   box lacks disk for HM3D-Semantics). §0 documents the WSL2/Windows setup and the dependency
   combination that actually installs.

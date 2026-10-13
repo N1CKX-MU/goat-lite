@@ -54,3 +54,30 @@ def path_to_action(
         return 2  # turn left (increase heading)
     else:
         return 3  # turn right (decrease heading)
+
+
+def bearing_error(
+    agent_xy,
+    heading: float,
+    target_xy,
+) -> float:
+    """Signed angle from where the agent is looking to a world XZ target.
+
+    Same frame convention as :func:`path_to_action`: at heading ``h`` forward is
+    ``(-sin h, -cos h)`` in world ``(x, z)``. The result is wrapped to
+    ``[-pi, pi]`` and positive means the target is on the side that
+    ``turn_left`` (action 2, which increases the compass) turns toward, so the
+    sign maps straight onto an action.
+
+    Args:
+        agent_xy: agent world (x, z).
+        heading: agent compass heading in radians.
+        target_xy: target world (x, z).
+
+    Returns:
+        Bearing error in radians; 0 means the target is dead ahead.
+    """
+    dx = float(target_xy[0]) - float(agent_xy[0])
+    dz = float(target_xy[1]) - float(agent_xy[1])
+    desired = math.atan2(-dx, -dz)
+    return (desired - heading + math.pi) % (2 * math.pi) - math.pi

@@ -732,29 +732,96 @@ class GoatAgent:
 
 ### 7.9 Week 9 — Development eval + debugging
 
-> **STATUS (2026-08-08) — pick up here tomorrow.**
-> Week 9 blocked on one thing: the detector. Baseline SR = 0% because the stock
-> COCO YOLOv8n can't see 30/36 GOAT categories. Fix in flight: friend is
-> finetuning YOLOv8n on HM3D-Semantics → will send back `checkpoints/yolo_goat.pt`
-> (see `TRAIN_YOLO.md`). All wiring + two control bugs already fixed and pushed:
-> - matcher image-modality routing, FSM premature-quit (commit 3398064)
-> - **heading convention in `path_to_action`** (commit 2f7693d) — VERIFIED
->   end-to-end in sim: agent turns the correct way in all 4 directions and
->   drives to target. Was inverted 180° + swapped turn signs → spin-in-place.
+> **STATUS (2026-10-13).** Week 9's artifacts exist and SR is no longer 0, but
+> the baseline is **below** this section's target and the gate below applies.
 >
-> **Tomorrow's checklist (in order):**
-> 1. [ ] Drop `yolo_goat.pt` into `checkpoints/` once it arrives; confirm it loads:
->        `python -c "from ultralytics import YOLO; m=YOLO('checkpoints/yolo_goat.pt'); print(len(m.names))"` (expect 36).
-> 2. [ ] Smoke test: run `python scripts/run_dev_eval.py --n-episodes 2` and
->        confirm **SR > 0** (proves detector + control now close the loop).
-> 3. [ ] If SR>0: launch full 30-ep dev eval in BACKGROUND with `python -u`
->        (buffered stdout otherwise), notify-on-done.
-> 4. [ ] Diagnose top failure bucket from `failures.jsonl`, one fix cycle.
-> 5. [ ] Then proceed to Week 10 ablations below.
+> **Development evaluation, memory-on arm** — 30 episodes, 218 subtasks, 22
+> scenes, 500 steps per subtask, `outputs/dev_eval_20261013_memon/`:
 >
-> If SR still 0 after the finetuned detector: check (a) cls_name equality
-> between detector vocab and GOAT categories, (b) `success_distance`/`world_xyz`
-> noise, (c) whether `image` subtasks localize by category as intended.
+> | | |
+> |---|---|
+> | SR | **2.8%** (6/218) |
+> | SPL | 0.026 |
+> | SR where the detector also fired at the stop | 0.5% |
+> | median final distance to goal | 4.49 m |
+> | subtasks that called STOP at all | 30.3% |
+>
+> By modality: category 3.7%, language 4.3%, **image 0.0%**. By category,
+> successes occur only in `mirror` (7.5% of 40), `picture` (7.4% of 27) and
+> `microwave` (7.1% of 14) — the three the detector can actually see. Every
+> other category is 0%, including all 20 `rug` subtasks, which Section 6.42 of
+> the engineering log predicts: a rug's centroid cannot be framed from inside
+> the success radius with a 1.41 m camera and no pitch action.
+>
+> **Lifelong curve** (SR by subtask index, memory-on): 0.0, 0.0, 3.3, 3.3, 3.3,
+> 0.0, 5.9, 6.7, 0.0, 16.7%. Upward, but the later indices carry 6–17 subtasks
+> each, so this is suggestive and not yet a result. The memory-off arm is
+> running on identical episodes for the paired comparison.
+>
+> **Week 9 done criteria: met.**
+> - [x] `run_dev_eval.py` produces the full artifacts — `results.csv`,
+>       `summary.json`, `failures.jsonl`, plus a generated
+>       `failure_notes.md` (`scripts/failure_report.py`).
+> - [x] Debugging cycles completed with measurable improvement — the stop
+>       decision (6.35–6.37), which produced the first scored successes, and the
+>       unreachable-goal livelock (6.47).
+> - [x] Failure taxonomy documented — generated from the artifacts rather than
+>       transcribed, so it cannot drift from them.
+>
+> **This section's gate says: "If below 10%, stop and diagnose before Week 10."**
+> Diagnosis is done, and it is not one thing:
+>
+> | what happened | share |
+> |---|---|
+> | timed out more than 3 m away | 55.5% |
+> | stopped at the wrong object (>3 m) | 15.1% |
+> | timed out 1–3 m short | 11.9% |
+> | stopped 1–3 m short | 11.0% |
+> | **success** | 2.8% |
+> | reached the goal but never stopped | 2.3% |
+> | stopped inside the radius, goal not visible | 1.4% |
+>
+> Three fixes are already implemented and land in the next run, in expected
+> order of value:
+> 1. **Unreachable goals no longer burn the budget** (6.47). 22.4% of subtasks
+>    spent all 500 steps having moved < 0.01 m, with zero successes, because an
+>    unreachable matched node was re-approached forever. Freed: ~485 steps each.
+> 2. **Image-goal matching** (6.43). Image is 0/67 here, and these runs predate
+>    the fix — they localise image goals by category, which picks the referenced
+>    instance with probability ≈0.58.
+> 3. **The commit band** (6.37), which stops the agent inside the radius rather
+>    than on its boundary.
+>
+> So Week 10 is entered with the gate acknowledged rather than ignored: re-run
+> the baseline with these three, then sweep. `scripts/sweep.py` and the exposed
+> knobs are ready.
+>
+> **UPDATE (2026-10-13, run #3).** The re-run with those three fixes is done,
+> both arms, `outputs/dev_eval_run3_{memon,nomem}/`. Engineering log 6.50–6.51.
+>
+> | | run #2 | run #3 |
+> |---|---|---|
+> | SR, memory on | 2.8% (6/218) | **3.2% (7/218)** |
+> | SR, memory off | 2.3% (5/218) | **3.2% (7/218)** |
+> | stationary for the whole budget | 22.4% | **0%** |
+> | image goals embedded | 0 of 5 | **67 of 67** |
+>
+> Each fix is verified working in isolation; together they bought **one extra
+> success**. The memory delta is now **exactly 0.0 pp**, so this section's
+> successor gate in 7.10 is *not* met and must not be recorded as met.
+>
+> The diagnosis has moved, and this is what should drive Week 10. The agent
+> explores a median of **86.0 m²** against a median navigable area of
+> **88.9 m²** — essentially the whole scene — and **58.3% of failures never
+> match a candidate at all**. Of the 43.6% of subtasks that do match, the node
+> is a median of **3.83 m** from the nearest true instance (28 of 95 within
+> 1 m). Exploration and the stop rule are no longer the binding constraints;
+> detection and matcher precision are.
+>
+> **Consequence for the sweep below:** none of its axes acts on detection, and
+> at 3.2% SR a six-arm grid separates arms by one or two successes. The sweep
+> proceeds as 7.10 specifies; this is a caveat on reading its table, not a
+> reason to skip it. See 7.10's status note.
 
 **Prereqs:** Week 8 done.
 
@@ -789,6 +856,38 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 ---
 
 ### 7.10 Week 10 — Hyperparameter sweep + ablation setup
+
+> **STATUS (2026-10-13).** The ablation infrastructure is built and has been run
+> twice; the done criteria below are **1 of 3 met**.
+>
+> - [x] Memory-on vs memory-off run on identical episodes, paired by position,
+>       `scripts/sweep.py` and every knob exposed as a flag.
+> - [ ] All planned ablations run — the five grids have not been run, and are
+>       deliberately deferred; see below.
+> - [ ] Best config identified and written into `configs/agent_default.yaml`.
+> - [ ] **Memory on-vs-off delta > 0 — NOT MET.** It is exactly **0.0 pp**
+>       (7/218 against 7/218). This section says "if not, memory is broken — go
+>       back". The more defensible reading, from 6.50, is that the delta is
+>       *unresolvable* rather than negative: with 7 successes, one subtask is
+>       1.4 pp, so no delta smaller than that can be measured at all. Memory is
+>       not demonstrably broken; it is unmeasurable at this SR.
+>
+> **The grids are run as this section specifies** (decision 2026-10-13). The
+> measured caveat is recorded here rather than acted on: every axis below —
+> language threshold, merge distance, merge similarity, encoder choice, success
+> distance, planner, frontier scoring — acts on a stage the median subtask never
+> reaches, since 58.3% of failures never match a candidate and the agent already
+> covers ~97% of the navigable area. At 3.2% SR one success is 1.4 pp, so arms
+> separated by a single subtask are not separated. Read the resulting table with
+> that resolution in mind, and treat a winner as provisional unless it clears
+> its neighbours by more than one or two successes.
+>
+> Sweep on 10 episodes to rank, confirm the winner on 30, per this section's own
+> budget note. `scripts/sweep.py` drives it and every knob is a flag.
+>
+> The in-radius detector ceiling (`scripts/detector_ceiling.py`) is measured
+> alongside as a cheap Week 9 diagnostic. It bounds what any arm could score,
+> but it does not gate the sweep.
 
 **Prereqs:** Week 9 baseline established.
 
@@ -875,6 +974,40 @@ Choose one stretch feature if the schedule allows. In priority order:
 
 **Stretch A: Image goals (third modality).** Add `modality == "image"` to `GoalMatcher`. Encode goal image with CLIP image encoder, cosine-sim vs stored instance embeddings. Easy — mostly a matcher change. Re-run dev eval with all three modalities. ~2 days.
 
+> **Note 2026-10-13 — promoted from stretch to required.** This is not optional
+> polish; image subtasks are currently near-chance by construction. The matcher
+> routes `image` through `_match_category`, i.e. the *nearest* instance of the
+> category, while the scorer credits only the **one** referenced instance. The
+> goal image's pixels are never used.
+>
+> Measured over the 30-episode dev subset, instances of the goal category
+> present in the scene:
+>
+> | modality | n | median instances | with >1 instance |
+> |---|---|---|---|
+> | category | 81 | 4 | 58 (72%) |
+> | language | 70 | 2 | 47 (67%) |
+> | image | 67 | 2 (max 47) | 41 (61%) |
+>
+> Expected chance that "nearest of class" is the right instance: **0.58 for
+> image**, 0.49 for language. With the image modality's in-radius detector
+> ceiling on top of that, image SR is capped near 25% however good navigation
+> becomes — and image is 67 of 218 dev subtasks.
+>
+> Design, so it is not re-derived later. `ClipEncoder.encode_image()` already
+> exists. Each goal carries ~59 `image_goals`, each an agent pose plus `hfov`
+> (76) and `image_dimensions` (512), so the goal view must be **rendered**:
+> save the agent state, set the given pose, grab RGB, restore. Our sensor is
+> 90°, so a centre crop of tan(38°)/tan(45°) = 0.781 approximates the 76° frame.
+>
+> Then make the goal embedding come from the **same distribution** as the node
+> embeddings: node embeddings are CLIP over *detector crops*, so run the
+> detector on the rendered goal view, crop its highest-confidence box of the
+> goal category, and encode that. If the detector does not fire on the goal
+> image, fall back to nearest-of-category, which is today's behaviour. Match by
+> image-image cosine similarity within the goal category, with an
+> `image_threshold` to be measured rather than guessed.
+
 **Stretch B: LightGlue for image-image verification.** In VERIFYING state, use LightGlue to keypoint-match the goal image against the current view for a stronger success signal. Improves image-goal accuracy. ~3 days.
 
 **Stretch C: Open-vocab detection swap.** Replace YOLOv8n with YOLO-World-S. Re-run key benchmarks and add an ablation row. Only if VRAM budget was underutilized in earlier smoke tests. ~2 days.
@@ -915,6 +1048,36 @@ Finish full report. Circulate to guide for feedback.
 - Wall-clock time per subtask (median, 95th percentile)
 
 **What is "success"?** GOAT-Bench's own definition: agent called STOP action, and at STOP time (a) the agent is within 1.0 m euclidean of the correct instance's ground-truth position, and (b) the correct instance is within the agent's current field of view. We do not reinvent this definition.
+
+> **Note 2026-10-13 — how clause (b) is implemented.** The definition above is
+> unchanged; what changed is the code behind it. `runner.py` used to decide
+> "within the field of view" by running the *agent's own YOLO* on the final
+> frame and looking for the goal class. That is not this definition: being in
+> the field of view is a geometric property of the scene and the camera, and
+> GOAT-Bench has no access to the agent's internals (the episode files carry 30
+> ground-truth `view_points` per goal, which is how the benchmark expresses
+> visibility). Using the detector made SR a function of detector recall twice
+> over and incomparable with published numbers.
+>
+> It was also unsatisfiable. Probed at five radii, the detector fires on the
+> goal class from 7% of poses at 0.5 m, 9% at 0.8 m, 20% at 1.2 m, 34% at 1.5 m
+> and 28% at 2.5 m, while success *requires* a stop inside 1.0 m — so a
+> geometrically correct arrival was rejected about nine times in ten. The scenes
+> are not the obstacle: over all 1246 annotated `val_unseen` goals, the median
+> ground-truth viewpoint sits 1.10 m from its object and 90% of goals have a
+> viewpoint inside 1.0 m.
+>
+> Clause (b) is now `instance_in_view()` in `src/eval/metrics.py`: project the
+> ground-truth centroid into the camera, require it inside the image and in
+> front, and test occlusion against the depth buffer (depth rather than a
+> semantic mask, because the local HM3D val scenes ship no semantic assets —
+> a stated limitation). Success is granted if **any** valid instance is both
+> inside the radius and visible, since a category subtask accepts any instance.
+>
+> The detector-based answer is still recorded per subtask as `detector_in_view`
+> and aggregated as `sr_detector_agrees`. **Report both**: the benchmark's SR,
+> and the stricter rate where the agent also recognised what it had reached.
+> Engineering log 6.35–6.36 has the measurements.
 
 **Reporting the memory ablation.** Report memory-on and memory-off numbers side-by-side on the same episode set. Report the lifelong curve for memory-on. Interpret honestly — if goal-5 SR is not higher than goal-1 SR, say so.
 
@@ -973,4 +1136,4 @@ Note them in the Future Work section of the report — they make the story feel 
 
 ---
 
-**Last updated:** at project start. Update the "Last updated" date and add a dated note under each Section 7.N as you close out that week.
+**Last updated:** 2026-10-13 — Section 7.9 carries the development-evaluation status, Section 8 a note on how the visibility criterion is implemented, and Section 7.13 the promotion of image goals from stretch to required.

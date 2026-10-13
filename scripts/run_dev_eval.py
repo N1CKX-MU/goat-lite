@@ -28,7 +28,7 @@ from src.memory.instance_db import InstanceDatabase
 from src.matching.goal_matcher import GoalMatcher
 from src.agent.goat_agent import GoatAgent
 from src.eval.runner import run_episode, _resolve_scene_path
-from src.eval.report import save_results
+from src.eval.report import save_results, load_results, resumable_prefix
 
 
 def build_agent(
@@ -36,6 +36,13 @@ def build_agent(
     device: str = "cuda",
     camera_height: float = 1.41,
     scene_bounds: tuple = None,
+    min_observations: int = 2,
+    language_threshold: float = 0.24,
+    image_threshold: float = -1.0,
+    merge_dist_m: float = 0.75,
+    merge_embed_sim: float = 0.85,
+    success_distance: float = 1.0,
+    commit_distance_frac: float = None,
 ) -> GoatAgent:
     """Build the full agent with all subsystems.
 
@@ -43,12 +50,25 @@ def build_agent(
     given, the occupancy grid is sized and centred on the scene; without it the
     map falls back to a 24 m window on the world origin, which does not contain
     18 of the 36 val scenes.
+
+    ``min_observations`` is the evidence a remembered instance needs before the
+    matcher will target it. It is a sweep axis, so it is threaded through rather
+    than left at the GoalMatcher default.
+
+    NOTE: this does not read configs/agent_default.yaml. The defaults here are
+    the effective configuration at eval time.
     """
     detector = YOLODetector(device=device)
     encoder = ClipEncoder(device=device)
     perception = PerceptionPipeline(detector, encoder, intrinsics)
-    memory = InstanceDatabase()
-    matcher = GoalMatcher(encoder)
+    memory = InstanceDatabase(merge_dist_m=merge_dist_m,
+                             merge_embed_sim=merge_embed_sim)
+    matcher = GoalMatcher(
+        encoder,
+        min_observations=min_observations,
+        language_threshold=language_threshold,
+        image_threshold=image_threshold,
+    )
     # camera_height lets the map derive the floor from the camera pose instead
     # of assuming floor Y == 0, which no HM3D scene satisfies.
     if scene_bounds is not None:
@@ -59,6 +79,9 @@ def build_agent(
     else:
         semantic_map = SemanticMap(camera_height=camera_height)
 
+    kwargs = {}
+    if commit_distance_frac is not None:
+        kwargs["commit_distance_frac"] = commit_distance_frac
     return GoatAgent(
         perception=perception,
         memory=memory,
@@ -66,33 +89,66 @@ def build_agent(
         semantic_map=semantic_map,
         intrinsics=intrinsics,
         max_steps=500,
-        success_distance=1.0,
+        success_distance=success_distance,
+        **kwargs,
     )
 
 
 def main():
     parser = argparse.ArgumentParser(description="GOAT-Lite dev evaluation")
-    parser.add_argument("--n-episodes", type=int, default=30)
+    parser.add_argument("--n-episodes", type=int, default=30,
+                        help="size of the deterministic dev subset; 0 or a "
+                             "negative value means the WHOLE split, which is "
+                             "the final run reserved by PLAN.md Section 8")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--hm3d-root", type=str, default="data/hm3d")
     parser.add_argument("--dataset-root", type=str,
                         default="data/datasets/goat_bench/hm3d/v1/val_unseen")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip scenes already complete in the output "
+                             "directory's results.csv and keep their rows")
+    parser.add_argument("--min-observations", type=int, default=2,
+                        help="times an instance must be seen before the "
+                             "matcher will target it (1 disables the gate)")
+    # Sweep axes (PLAN.md Section 7.10). Defaults mirror the code, so omitting
+    # them all reproduces the configuration in configs/agent_default.yaml.
+    parser.add_argument("--language-threshold", type=float, default=0.24)
+    parser.add_argument("--image-threshold", type=float, default=-1.0)
+    parser.add_argument("--merge-dist", type=float, default=0.75)
+    parser.add_argument("--merge-embed-sim", type=float, default=0.85)
+    parser.add_argument("--success-distance", type=float, default=1.0)
+    parser.add_argument("--commit-distance-frac", type=float, default=None,
+                        help="fraction of the success distance at which the "
+                             "agent commits to a stop (default: the code's 0.8)")
+    parser.add_argument("--no-memory", action="store_true",
+                        help="memory-off arm of the ablation: clear instance "
+                             "memory and the map before every subtask instead "
+                             "of carrying them across an episode")
     args = parser.parse_args()
 
     # Output directory with timestamp
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output_dir = f"outputs/dev_eval_{timestamp}"
+        suffix = "_nomem" if args.no_memory else ""
+        args.output_dir = f"outputs/dev_eval_{timestamp}{suffix}"
 
     print(f"Loading val_unseen episodes from {args.dataset_root}...")
     all_episodes = load_val_unseen(args.dataset_root)
     print(f"  Total: {len(all_episodes)} episodes")
 
-    dev_episodes = sample_dev_subset(all_episodes, n=args.n_episodes, seed=args.seed)
+    if args.n_episodes and args.n_episodes > 0:
+        dev_episodes = sample_dev_subset(
+            all_episodes, n=args.n_episodes, seed=args.seed)
+        label = "Dev subset"
+    else:
+        # The full split. PLAN.md Section 8 reserves this for exactly one run
+        # on the locked configuration, so it is never the default.
+        dev_episodes = all_episodes
+        label = "FULL SPLIT"
     total_subtasks = sum(len(ep.subtasks) for ep in dev_episodes)
-    print(f"  Dev subset: {len(dev_episodes)} episodes, {total_subtasks} subtasks")
+    print(f"  {label}: {len(dev_episodes)} episodes, {total_subtasks} subtasks")
 
     # Group episodes by scene for efficiency (avoid reloading scenes)
     by_scene: dict[str, list] = {}
@@ -102,9 +158,36 @@ def main():
 
     all_results = []
     scene_count = 0
+    scenes_done = 0
+
+    if args.resume:
+        # Resume at SCENE granularity, never mid-episode: memory and the map
+        # persist across the subtasks of an episode, so replaying half an
+        # episode would start it from state it never had.
+        #
+        # The prefix is matched POSITIONALLY. (episode_id, subtask_index) is not
+        # unique across a run -- GOAT-Bench numbers episodes per scene, and over
+        # this subset 218 subtasks share only 86 such pairs -- so matching on it
+        # silently skips scenes that merely share ids with earlier ones.
+        prior = load_results(args.output_dir)
+        scene_keys = [
+            [(ep.episode_id, i) for ep in eps for i in range(len(ep.subtasks))]
+            for eps in by_scene.values()
+        ]
+        all_results, scenes_done = resumable_prefix(prior, scene_keys)
+        if prior:
+            print(f"  Resuming: {len(all_results)} subtasks over "
+                  f"{scenes_done} complete scenes "
+                  f"({len(prior) - len(all_results)} rows discarded as "
+                  f"unverifiable)")
 
     for scene_id, scene_episodes in by_scene.items():
         scene_count += 1
+        if scene_count <= scenes_done:
+            print(f"\n[{scene_count}/{len(by_scene)}] Skipping (already done): "
+                  f"{scene_id.split('/')[-2]}")
+            continue
+
         scene_path = _resolve_scene_path(scene_id, args.hm3d_root)
         print(f"\n[{scene_count}/{len(by_scene)}] Loading scene: {scene_path}")
 
@@ -116,7 +199,14 @@ def main():
 
         intrinsics = env.intrinsics
         agent = build_agent(
-            intrinsics, device=args.device, scene_bounds=env.get_scene_bounds()
+            intrinsics, device=args.device, scene_bounds=env.get_scene_bounds(),
+            min_observations=args.min_observations,
+            language_threshold=args.language_threshold,
+            image_threshold=args.image_threshold,
+            merge_dist_m=args.merge_dist,
+            merge_embed_sim=args.merge_embed_sim,
+            success_distance=args.success_distance,
+            commit_distance_frac=args.commit_distance_frac,
         )
 
         for ep in scene_episodes:
@@ -124,7 +214,10 @@ def main():
             t0 = time.perf_counter()
 
             try:
-                results = run_episode(env, agent, ep)
+                results = run_episode(
+                    env, agent, ep,
+                    keep_memory_across_subtasks=not args.no_memory,
+                )
                 all_results.extend(results)
 
                 successes = sum(1 for r in results if r.success)

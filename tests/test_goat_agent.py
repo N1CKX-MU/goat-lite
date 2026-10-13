@@ -7,7 +7,9 @@ import math
 import numpy as np
 import pytest
 
-from src.agent.goat_agent import GoatAgent, AgentState
+from src.agent.goat_agent import (
+    GoatAgent, AgentState, APPROACH_GIVEUP_TURNS,
+)
 from src.sim.env import Observation, GoalSpec
 from src.perception.pipeline import PerceivedInstance
 from src.memory.instance_db import InstanceNode
@@ -51,8 +53,12 @@ class FakeMemory:
     def __init__(self, nodes=None):
         self._nodes = nodes or []
         self.update_calls = 0
+        self.clear_calls = 0
     def update(self, perceived, step):
         self.update_calls += 1
+    def clear(self):
+        self.clear_calls += 1
+        self._nodes = []
     def all_nodes(self):
         return list(self._nodes)
     def query_by_class(self, cls_id):
@@ -64,11 +70,16 @@ class FakeMemory:
 
 
 class FakeMatcher:
-    """Returns configurable match results."""
+    """Returns configurable match results, honouring the exclusion set."""
     def __init__(self, result=None):
         self.result = result or (None, 0.0)
-    def match(self, goal, db, agent_xy=None):
-        return self.result
+        self.last_exclude = set()
+    def match(self, goal, db, agent_xy=None, exclude_ids=None):
+        self.last_exclude = set(exclude_ids or ())
+        node, score = self.result
+        if node is not None and node.node_id in self.last_exclude:
+            return None, 0.0
+        return node, score
 
 
 class FakeMap:
@@ -77,6 +88,9 @@ class FakeMap:
         self._gs = grid_size
         self._occ = np.zeros((grid_size, grid_size), dtype=np.int8)
         self._explored = np.zeros((grid_size, grid_size), dtype=bool)
+        self.clear_calls = 0
+    def clear(self):
+        self.clear_calls += 1
     def update_from_depth(self, depth, pose, intrinsics):
         pass
     def update_from_detections(self, instances):
@@ -214,11 +228,17 @@ class TestDoneState:
         assert action == 0
 
     def test_reset_keep_memory(self):
-        """Reset with keep_memory=True should preserve memory but change state."""
-        memory = FakeMemory(nodes=[_make_node()])
+        """Reset with keep_memory=True should preserve memory but change state.
+
+        Sequenced as the eval runs it: subtask 0 resets WITHOUT keep_memory (and
+        so clears), the subtask then populates memory, and subtask 1 resets WITH
+        keep_memory and must inherit it.
+        """
+        memory = FakeMemory()
         agent = _make_agent(memory=memory)
         agent.reset(_make_obs())
         agent.act(_make_obs())
+        memory._nodes = [_make_node()]
 
         agent.reset(_make_obs(), keep_memory=True)
         assert agent.state == AgentState.SEARCHING
@@ -242,3 +262,222 @@ class TestActionOutput:
             obs = _make_obs(gps=(float(i) * 0.1, 0.0))
             action = agent.act(obs)
             assert action in (0, 1, 2, 3)
+
+
+# ── Verification: arriving is not the same as confirming ──
+
+def _apply_turn(heading: float, action: int) -> float:
+    """Advance a heading by one turn action (30 deg; left increases)."""
+    if action == 2:
+        return heading + math.radians(30.0)
+    if action == 3:
+        return heading - math.radians(30.0)
+    return heading
+
+
+def _verify_setup(node_xyz, detections=()):
+    """An agent already inside the success radius of a matched node."""
+    node = _make_node(world_xyz=node_xyz)
+    matcher = FakeMatcher(result=(node, 0.9))
+    agent = _make_agent(
+        matcher=matcher,
+        perception=FakePerception(detections=list(detections)),
+        success_distance=1.0,
+    )
+    agent.reset(_make_obs(gps=(0.0, 0.0)))
+    return agent, matcher, node
+
+
+class TestVerification:
+    """Measured on episode 24 subtask 2: the agent reached 0.19 m from the
+    goal with `goal_in_view` False for the entire subtask, because VERIFYING
+    drove forward instead of turning to face the object."""
+
+    def test_verifying_turns_toward_a_goal_it_cannot_see(self):
+        # Node 0.6 m BEHIND the agent: inside the success radius, out of frame.
+        from src.agent.action import bearing_error
+        agent, _, node = _verify_setup((0.0, 0.5, 0.6))
+
+        heading = 0.0
+        for _ in range(8):
+            action = agent.act(_make_obs(gps=(0.0, 0.0), heading=heading))
+            assert action in (2, 3), f"expected a turn, got {action}"
+            heading = _apply_turn(heading, action)
+            err = bearing_error(
+                np.array([0.0, 0.0]), heading, node.world_xyz[[0, 2]]
+            )
+            if abs(err) <= math.radians(30.0):
+                break
+        else:
+            pytest.fail("never turned to face the goal")
+
+    def test_verifying_never_drives_forward(self):
+        """Forward inside the success radius is what put the agent
+        nose-to-surface with a wall-mounted goal, pushing it out of frame."""
+        agent, _, _ = _verify_setup((0.0, 0.5, 0.6))
+        heading = 0.0
+        for _ in range(11):
+            action = agent.act(_make_obs(gps=(0.0, 0.0), heading=heading))
+            assert action != 1, "VERIFYING must not drive into the goal"
+            heading = _apply_turn(heading, action)
+
+    def test_verifying_stops_when_goal_comes_into_view(self):
+        det = PerceivedInstance(
+            cls_id=0, cls_name="chair", conf=0.8,
+            bbox=(50, 50, 150, 150),
+            crop_thumbnail=np.zeros((64, 64, 3), dtype=np.uint8),
+            clip_embed=_make_embed(0),
+            world_xyz=np.array([0.0, 0.5, 0.6]),
+            seen_step=0,
+        )
+        agent, _, _ = _verify_setup((0.0, 0.5, 0.6), detections=[det])
+        action = agent.act(_make_obs(gps=(0.0, 0.0)))
+        assert action == 0
+        assert agent.state == AgentState.DONE
+
+    def test_closes_in_before_committing(self):
+        """Stopping the instant the node enters the success radius leaves no
+        margin for the node's own position error. Measured on the dev eval: two
+        subtasks stopped 1.02 m from the true instance -- failures by 2 cm --
+        because VERIFYING triggers at `dist <= success_distance` and the agent
+        committed right on the boundary."""
+        # Node 0.95 m dead ahead: inside the radius, outside the commit band.
+        agent, _, _ = _verify_setup((0.0, 0.5, -0.95))
+        action = agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert action == 1, "should close in while still near the boundary"
+        assert agent.state == AgentState.VERIFYING
+
+    def test_does_not_close_in_before_facing_the_goal(self):
+        """Forward only once aligned, or it is the nose-to-wall bug again."""
+        agent, _, _ = _verify_setup((0.0, 0.5, 0.95))  # 0.95 m BEHIND
+        action = agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert action in (2, 3)
+
+    def test_commits_once_it_faces_the_goal(self):
+        """Inside the success radius and facing its matched instance, the agent
+        must decide. Waiting for a fresh detection instead is the defect: the
+        detector fires from 5 of 56 poses at 0.8 m, so demanding one at the stop
+        pose rejects nine arrivals in ten, and reverting to APPROACHING while
+        still inside the radius re-enters VERIFYING on the next tick with the
+        counter reset -- a livelock that ran to the 500-step timeout."""
+        agent, _, _ = _verify_setup((0.0, 0.5, 0.6))
+        heading = 0.0
+        for tick in range(10):
+            action = agent.act(_make_obs(gps=(0.0, 0.0), heading=heading))
+            assert action != 1
+            if action == 0:
+                assert agent.state == AgentState.DONE
+                break
+            heading = _apply_turn(heading, action)
+        else:
+            pytest.fail("never committed to a decision")
+
+    def test_gives_up_on_a_node_it_cannot_bring_into_frame(self):
+        """Constant heading: the turns have no effect, standing in for an agent
+        that cannot get the node into frame. It must drop the node and look
+        elsewhere rather than verify it forever."""
+        agent, matcher, node = _verify_setup((0.0, 0.5, 0.6))
+        for _ in range(20):
+            agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert node.node_id in matcher.last_exclude
+        assert agent.state != AgentState.VERIFYING
+
+    def test_rejection_lasts_only_for_the_subtask(self):
+        agent, matcher, node = _verify_setup((0.0, 0.5, 0.6))
+        for _ in range(20):
+            agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert node.node_id in matcher.last_exclude
+
+        agent.reset(_make_obs(gps=(0.0, 0.0)), keep_memory=True)
+        agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert node.node_id not in matcher.last_exclude
+
+
+class TestMemoryLifecycle:
+    """reset(keep_memory=False) was `pass  # memory.clear() would go here`.
+    The eval builds one agent per scene, so memory and map survived from one
+    episode into the next -- the lifelong curve measures within an episode, so
+    a leak across episodes confounds exactly the headline result, and the
+    memory on/off ablation could not be run at all."""
+
+    def test_reset_without_keep_memory_clears_memory_and_map(self):
+        memory, smap = FakeMemory(nodes=[_make_node()]), FakeMap()
+        agent = _make_agent(memory=memory, semantic_map=smap)
+        agent.reset(_make_obs(), keep_memory=False)
+        assert memory.clear_calls == 1
+        assert smap.clear_calls == 1
+        assert memory.all_nodes() == []
+
+    def test_reset_with_keep_memory_preserves_both(self):
+        memory, smap = FakeMemory(nodes=[_make_node()]), FakeMap()
+        agent = _make_agent(memory=memory, semantic_map=smap)
+        agent.reset(_make_obs(), keep_memory=True)
+        assert memory.clear_calls == 0
+        assert smap.clear_calls == 0
+        assert len(memory.all_nodes()) == 1
+
+    def test_missing_clear_is_tolerated(self):
+        """Duck-typed subsystems: a memory or map without clear() must not
+        crash the reset path."""
+        class Bare:
+            def update(self, perceived, step): pass
+            def all_nodes(self): return []
+            def query_by_class_name(self, name): return []
+
+        agent = _make_agent(memory=Bare())
+        agent.reset(_make_obs(), keep_memory=False)
+        assert agent.state == AgentState.SEARCHING
+
+
+class TestUnreachableGoal:
+    """An unreachable matched node used to burn the entire step budget.
+
+    Measured on the dev eval: 28 of 125 subtasks (22.4%) ran all 500 steps
+    having moved less than 0.01 m, zero of them successful -- and none at
+    subtask index 0, because an empty memory has no node to get stuck on. The
+    approach give-up cleared `_matched_node` without rejecting it, so the
+    matcher returned the same node on the next tick and the agent cycled
+    APPROACHING -> four failed plans -> SEARCHING -> re-match, turning in place
+    until the subtask timed out.
+    """
+
+    def _sealed_room_map(self):
+        """Free floor with a walled-off room the agent cannot plan into."""
+        class Walled(FakeMap):
+            def __init__(self):
+                super().__init__(grid_size=120)
+                self._occ[40:60, 40:60] = 1      # wall
+                self._occ[43:57, 43:57] = 0      # interior, but no door
+                self._resolution = 0.05
+
+            def world_to_grid(self, xy):
+                return (int(round(xy[1] / 0.05)), int(round(xy[0] / 0.05)))
+
+        return Walled()
+
+    def _agent_facing_a_sealed_goal(self):
+        node = _make_node(node_id=1, world_xyz=(2.5, 0.5, 2.5))  # room centre
+        matcher = FakeMatcher(result=(node, 0.9))
+        agent = _make_agent(matcher=matcher,
+                            semantic_map=self._sealed_room_map())
+        agent.reset(_make_obs(gps=(4.0, 4.0)))
+        return agent, matcher, node
+
+    def test_rejects_a_node_it_cannot_reach(self):
+        agent, matcher, node = self._agent_facing_a_sealed_goal()
+        for _ in range(40):
+            agent.act(_make_obs(gps=(4.0, 4.0)))
+        assert node.node_id in matcher.last_exclude, \
+            "an unreachable node must be rejected, not re-offered forever"
+
+    def test_does_not_burn_the_budget_on_an_unreachable_node(self):
+        agent, matcher, node = self._agent_facing_a_sealed_goal()
+        # Once rejected and with nothing else in memory, the agent must stop
+        # re-entering APPROACHING for the same node.
+        approaching = 0
+        for _ in range(60):
+            agent.act(_make_obs(gps=(4.0, 4.0)))
+            if agent.state == AgentState.APPROACHING:
+                approaching += 1
+        assert approaching <= APPROACH_GIVEUP_TURNS + 2, (
+            f"spent {approaching} ticks approaching an unreachable node")

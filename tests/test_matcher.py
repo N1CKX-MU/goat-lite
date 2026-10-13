@@ -229,3 +229,169 @@ class TestTemplateWrapping:
 
         assert len(calls) == 1
         assert calls[0] == "the chair with red cushion near the window"
+
+
+class TestExclusions:
+    """The agent rules out nodes it approached and could not confirm, and the
+    matcher must then fall through to the next candidate rather than to None --
+    the dev subset has a median of 4 instances of a category per scene, so the
+    next one is usually worth trying."""
+
+    def _db_with_two_chairs(self) -> InstanceDatabase:
+        db = InstanceDatabase()
+        db.update([_make_pi(cls_name="chair", world_xyz=(1.0, 0.5, 0.0),
+                            embed_seed=1)], step=0)
+        db.update([_make_pi(cls_name="chair", world_xyz=(5.0, 0.5, 0.0),
+                            embed_seed=2)], step=1)
+        return db
+
+    def test_excluded_node_yields_the_next_nearest(self):
+        db = self._db_with_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="category", value="chair")
+        agent_xy = np.array([0.0, 0.0])
+
+        near, _ = matcher.match(goal, db, agent_xy)
+        assert np.isclose(near.world_xyz[0], 1.0)
+
+        far, _ = matcher.match(goal, db, agent_xy, exclude_ids={near.node_id})
+        assert far is not None
+        assert far.node_id != near.node_id
+        assert np.isclose(far.world_xyz[0], 5.0)
+
+    def test_excluding_everything_reports_not_found(self):
+        db = self._db_with_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="category", value="chair")
+        ids = {n.node_id for n in db.all_nodes()}
+
+        node, score = matcher.match(goal, db, np.array([0.0, 0.0]), exclude_ids=ids)
+        assert node is None
+        assert score == 0.0
+
+    def test_language_honours_exclusions(self):
+        db = self._db_with_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder(), language_threshold=-1.0)
+        goal = GoalSpec(modality="language", value="a chair by the window",
+                        category="chair")
+        ids = {n.node_id for n in db.all_nodes()}
+
+        assert matcher.match(goal, db, exclude_ids=ids)[0] is None
+        assert matcher.match(goal, db)[0] is not None
+
+
+class TestEvidenceGate:
+    """A node created from one detection at conf 0.15 used to be as targetable
+    as one seen fifty times. That is the mechanism behind the confident wrong
+    stop: detector conf was lowered 0.35 -> 0.15 because at 0.35 the agent saw
+    nothing in four frames out of five, and the price is false positives in
+    memory. A consistent false positive also defeats re-detection, since the
+    node carries the detector's own label."""
+
+    def _one_shot_db(self, conf: float) -> InstanceDatabase:
+        db = InstanceDatabase()
+        db.update([_make_pi(cls_name="chair", conf=conf,
+                            world_xyz=(1.0, 0.5, 0.0), embed_seed=3)], step=0)
+        return db
+
+    def test_single_weak_sighting_is_not_targetable(self):
+        db = self._one_shot_db(0.18)
+        matcher = GoalMatcher(encoder=FakeEncoder(), min_observations=2)
+        goal = GoalSpec(modality="category", value="chair")
+        node, score = matcher.match(goal, db, np.array([0.0, 0.0]))
+        # "Not found yet" keeps the agent exploring, which beats committing to
+        # an object that may not exist.
+        assert node is None
+        assert score == 0.0
+
+    def test_repeated_sighting_is_targetable(self):
+        db = self._one_shot_db(0.18)
+        db.update([_make_pi(cls_name="chair", conf=0.18,
+                            world_xyz=(1.05, 0.5, 0.0), embed_seed=3)], step=1)
+        assert db.all_nodes()[0].n_observations == 2
+
+        matcher = GoalMatcher(encoder=FakeEncoder(), min_observations=2)
+        goal = GoalSpec(modality="category", value="chair")
+        assert matcher.match(goal, db, np.array([0.0, 0.0]))[0] is not None
+
+    def test_one_very_confident_sighting_is_targetable(self):
+        """Starving the matcher is its own failure mode: the detector is
+        recall-limited, so a single high-confidence hit must still count."""
+        db = self._one_shot_db(0.85)
+        matcher = GoalMatcher(encoder=FakeEncoder(), min_observations=2,
+                              trust_confidence=0.5)
+        goal = GoalSpec(modality="category", value="chair")
+        assert matcher.match(goal, db, np.array([0.0, 0.0]))[0] is not None
+
+    def test_gate_is_disableable(self):
+        db = self._one_shot_db(0.18)
+        matcher = GoalMatcher(encoder=FakeEncoder(), min_observations=1)
+        goal = GoalSpec(modality="category", value="chair")
+        assert matcher.match(goal, db, np.array([0.0, 0.0]))[0] is not None
+
+    def test_gate_applies_to_language_goals(self):
+        db = self._one_shot_db(0.18)
+        matcher = GoalMatcher(encoder=FakeEncoder(), min_observations=2,
+                              language_threshold=-1.0)
+        goal = GoalSpec(modality="language", value="a chair by the window",
+                        category="chair")
+        assert matcher.match(goal, db)[0] is None
+
+
+class TestImageGoals:
+    """An image subtask names ONE instance and only that one is credited, but
+    image goals used to route through category matching -- the nearest instance
+    of the class, with the goal picture unused. 61% of dev-subset image
+    subtasks have more than one instance of the goal category in the scene."""
+
+    def _db_two_chairs(self):
+        """A near chair and a far chair with distinguishable embeddings."""
+        db = InstanceDatabase()
+        db.update([_make_pi(cls_name="chair", world_xyz=(1.0, 0.5, 0.0),
+                            embed_seed=7, conf=0.9)], step=0)
+        db.update([_make_pi(cls_name="chair", world_xyz=(9.0, 0.5, 0.0),
+                            embed_seed=8, conf=0.9)], step=1)
+        near, far = db.all_nodes()
+        return db, near, far
+
+    def test_goal_image_overrides_proximity(self):
+        db, near, far = self._db_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        # The goal picture looks like the FAR chair.
+        goal = GoalSpec(modality="image", value="chair", category="chair",
+                        goal_embedding=far.clip_embed.copy())
+
+        node, score = matcher.match(goal, db, np.array([0.0, 0.0]))
+        assert node.node_id == far.node_id, "should follow appearance, not distance"
+        assert score > 0.9
+
+    def test_without_a_goal_image_falls_back_to_nearest(self):
+        db, near, _ = self._db_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="image", value="chair", category="chair")
+
+        node, _ = matcher.match(goal, db, np.array([0.0, 0.0]))
+        assert node.node_id == near.node_id
+
+    def test_threshold_keeps_the_agent_exploring(self):
+        db, near, far = self._db_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder(), image_threshold=0.99)
+        goal = GoalSpec(modality="image", value="chair", category="chair",
+                        goal_embedding=_make_embed(99))
+
+        node, _ = matcher.match(goal, db, np.array([0.0, 0.0]))
+        assert node is None
+
+    def test_image_goals_honour_exclusions_and_the_evidence_gate(self):
+        db, near, far = self._db_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="image", value="chair", category="chair",
+                        goal_embedding=far.clip_embed.copy())
+
+        node, _ = matcher.match(goal, db, np.array([0.0, 0.0]),
+                                exclude_ids={far.node_id})
+        assert node is not None and node.node_id == near.node_id
+
+        gated = GoalMatcher(encoder=FakeEncoder(), min_observations=5,
+                            trust_confidence=1.1)
+        assert gated.match(goal, db, np.array([0.0, 0.0]))[0] is None

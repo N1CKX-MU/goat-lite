@@ -1,20 +1,35 @@
-# Default agent configuration
+# Effective agent configuration.
+#
+# This file MIRRORS the constructor defaults in src/, which are what actually
+# run: build_agent() in scripts/run_dev_eval.py does not read this file. That
+# split used to make the YAML quietly wrong, so tests/test_config.py now
+# asserts every value here against the code it documents and fails if either
+# side drifts. Change the code, then change this file; the test will say so.
+#
+# Values carrying a measurement have the measurement next to them. The
+# engineering log section is given as e.g. (6.23) -- see TECHNICAL_GUIDE.md.
+
 agent:
   max_steps: 500
-  success_distance: 1.0
+  success_distance: 1.0          # GOAT-Bench criterion, PLAN.md Section 8
+  camera_height: 1.41            # sensor mount; the map derives the floor from it (6.17)
+  # Finite-state-machine constants (module level in src/agent/goat_agent.py).
+  search_giveup_turns: 12        # a full 360 deg survey before concluding an area is done
+  approach_giveup_turns: 4
+  lookahead_cells: 10            # one forward step is 0.25 m = 5 cells; shorter overshoots
+  arrive_cells: 7
+  final_arrive_cells: 2          # the last waypoint needs a tighter radius or the agent strands
+  replan_every_steps: 15
+  verify_giveup_steps: 12        # 360 deg at 30 deg/turn; 5 could not frame a goal behind (6.37)
+  verify_facing_tol_deg: 30.0    # camera hfov is 90, so 45 either side; one turn is 30
+  commit_distance_frac: 0.8      # stopping at the boundary failed by 2 cm (6.37, 6.42)
 
 perception:
   detector:
-    # Finetuned GOAT-vocabulary weights; detector falls back to yolov8n.pt if absent.
-    weights: "checkpoints/yolo_goat.pt"
-    # Kept in sync with YOLODetector's default. NOTE: build_agent() in
-    # scripts/run_dev_eval.py does not currently read this file, so the code
-    # default is what actually takes effect at eval time.
-    conf: 0.15
+    weights: "checkpoints/yolo_goat.pt"   # absent -> silently falls back to COCO yolov8n
+    conf: 0.15                   # 0.35 gave detections in 20% of frames, 0.15 in 50% (6.23)
     iou: 0.5
-    # Must match the finetune resolution (scripts/finetune_yolo.py --imgsz).
-    # See PLAN.md Section 9 pitfall 4.
-    imgsz: 512
+    imgsz: 512                   # must equal the finetune resolution (6.11)
     fp16: true
   encoder:
     model_name: "ViT-B-32"
@@ -29,16 +44,31 @@ memory:
 
 matching:
   category_threshold: 0.0
-  language_threshold: 0.24
+  language_threshold: 0.24       # restricted to the goal's own category (6.31)
   use_template: true
+  min_observations: 2            # evidence before an instance is targetable (6.39)
+  trust_confidence: 0.5          # one sighting this confident also counts
+  image_threshold: -1.0          # minimum cosine: rank by appearance, never reject (6.43)
 
 mapping:
+  # size_m and origin are NOT fixed: they come from map_extent_for_scene() per
+  # scene, because 18 of the 36 val scenes do not fit a 24 m window on the
+  # world origin (6.27). The value below is only the constructor fallback.
   size_m: 24.0
   resolution_m: 0.05
-  num_classes: 37
+  num_classes: 37                # 36 GOAT categories + background
   min_height: 0.1
   max_height: 1.5
+  # Evidence-based occupancy. A one-shot write made every projection error
+  # permanent and filled the grid with phantom obstacles (6.22).
+  min_points_per_cell: 3
+  l_occ: 3
+  l_free: 1
+  clamp: 12
+  occ_threshold: 3
+  free_threshold: -2
 
 planner:
-  inflate_cells: 4
+  inflate_cells: 4               # 0.20 m against a 0.17 m agent radius; IMPASSABLE, not costly
   obstacle_penalty: 3.0
+  unknown_penalty: 2.0           # unknown stays passable: frontier goals sit on its boundary

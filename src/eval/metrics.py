@@ -35,6 +35,88 @@ def subtask_success(
     return bool(dist <= success_distance and goal_in_view)
 
 
+def instance_in_view(
+    instance_xyz: np.ndarray,
+    camera_pose: np.ndarray,
+    intrinsics: np.ndarray,
+    depth: np.ndarray,
+    window: int = 2,
+    occlusion_tol_m: float = 1.0,
+) -> bool:
+    """Is a ground-truth instance inside the camera frustum and unoccluded?
+
+    This is the benchmark's visibility criterion -- a geometric property of the
+    scene and the camera. It deliberately does NOT ask the agent's detector.
+
+    Scoring with the detector (which is what this module's caller used to do)
+    is wrong on three counts: the benchmark has no access to the agent's
+    internals, so it cannot be GOAT-Bench's definition; it makes SR a function
+    of detector recall twice over, once for finding the goal and again for
+    being credited with it; and it is measurably blind in exactly the band the
+    success radius forces the agent into. Probed over episode 24 of the dev
+    subset, the finetuned detector fired on the goal class from 4/56 poses at
+    0.5 m and 5/56 at 0.8 m, against 19/56 at 1.5 m -- so a geometrically
+    perfect stop inside 1.0 m was rejected about nine times in ten.
+
+    Occlusion is tested against the depth buffer rather than a semantic mask,
+    because the local HM3D val scenes ship no semantic assets. The instance
+    position is a centroid, so the object's own surface renders NEARER than
+    that: the test therefore allows the visible surface to sit up to
+    ``occlusion_tol_m`` (or half the range, whichever is more permissive) in
+    front of the centroid, and only calls it occluded beyond that. A wall in
+    the way fails this comfortably -- the stated failure case is a wall-mounted
+    goal approached from the next room, 0.9 m from the centroid with the wall
+    rendering at 0.1 m.
+
+    Args:
+        instance_xyz: [3] ground-truth world position of the instance.
+        camera_pose: [4, 4] world-from-camera SE(3). Must be the SENSOR pose.
+        intrinsics: [3, 3] camera matrix.
+        depth: [H, W] float32 depth in metres, as habitat returns it (0 where
+            there is no geometry).
+        window: half-width in pixels of the depth patch sampled around the
+            projected centroid.
+        occlusion_tol_m: how far in front of the centroid the nearest visible
+            surface may sit before the instance counts as occluded.
+
+    Returns:
+        True if the instance projects inside the image, lies in front of the
+        camera, and nothing nearer blocks it.
+    """
+    p_world = np.asarray(instance_xyz, dtype=np.float64)[:3]
+    R = np.asarray(camera_pose, dtype=np.float64)[:3, :3]
+    t = np.asarray(camera_pose, dtype=np.float64)[:3, 3]
+    p_cam = R.T @ (p_world - t)
+
+    # OpenGL convention: the camera looks down -Z, so a point in front has
+    # z < 0 and its range is -z. Same frame as depth_to_pointcloud_camera,
+    # whose inverse this is.
+    rng = -float(p_cam[2])
+    if rng <= 1e-6:
+        return False
+
+    fx, fy = float(intrinsics[0, 0]), float(intrinsics[1, 1])
+    cx, cy = float(intrinsics[0, 2]), float(intrinsics[1, 2])
+    u = cx + float(p_cam[0]) * fx / rng
+    v = cy - float(p_cam[1]) * fy / rng
+
+    h, w = depth.shape
+    ui, vi = int(round(u)), int(round(v))
+    if not (0 <= ui < w and 0 <= vi < h):
+        return False
+
+    patch = depth[
+        max(0, vi - window): min(h, vi + window + 1),
+        max(0, ui - window): min(w, ui + window + 1),
+    ]
+    rendered = patch[patch > 0.0]
+    if rendered.size == 0:
+        return False  # nothing rendered there at all; do not claim visibility
+
+    nearest_allowed = max(0.5 * rng, rng - occlusion_tol_m)
+    return bool(float(rendered.max()) >= nearest_allowed)
+
+
 def compute_spl(
     success: bool,
     shortest_path: float,

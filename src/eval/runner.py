@@ -11,7 +11,7 @@ import quaternion as qt
 
 from src.sim.env import HabitatEnv, GoalSpec, Observation
 from src.sim.goat_dataset import EpisodeSpec, SubtaskSpec, quaternion_from_coeffs
-from src.eval.metrics import subtask_success, compute_spl
+from src.eval.metrics import subtask_success, compute_spl, instance_in_view
 
 
 @dataclass
@@ -29,6 +29,26 @@ class SubtaskResult:
     shortest_path_length: float
     reason: str  # "success", "timeout", "wrong_stop", "no_plan"
     wall_time_s: float = 0.0
+    # ── Diagnostics. None of these affect scoring; they exist to split the
+    # dominant failure bucket. After the stop decision was fixed, most failures
+    # became "timed out more than 3 m away", which is three different problems
+    # wearing one label: never found a candidate, found the wrong one, or found
+    # the right one and ran out of steps. These separate them.
+    ever_matched: bool = False      # did the matcher ever return a node?
+    node_error_m: float = float("nan")  # final matched node to nearest true instance
+    steps_searching: int = 0
+    steps_approaching: int = 0
+    steps_verifying: int = 0
+    explored_m2: float = 0.0        # floor area the map had explored at the end
+    # Image subtasks only: did rendering the goal picture yield an embedding?
+    # False means the subtask fell back to category matching, which bounds how
+    # much image-goal matching can help at all.
+    image_goal_embedded: bool = False
+    # Did the agent's own detector also fire on the goal class in the final
+    # frame? Not part of the success criterion -- success uses the benchmark's
+    # geometric visibility test -- but recorded so the stricter
+    # "navigated there AND recognised it" rate stays reportable.
+    detector_in_view: bool = False
 
 
 def _resolve_scene_path(scene_id: str, hm3d_root: str = "data/hm3d") -> str:
@@ -90,11 +110,89 @@ def _make_goal_spec(subtask: SubtaskSpec) -> GoalSpec:
         )
 
 
+_IMAGE_GOAL_WARNED = False
+
+
+def _embed_image_goal(env: HabitatEnv, agent, subtask: SubtaskSpec):
+    """Render the goal picture for an image subtask and CLIP-embed it.
+
+    An image subtask hands the agent a photograph of ONE instance, and only
+    that instance is credited. The matcher used to ignore the picture entirely
+    and go to the nearest instance of the category: measured over the dev
+    subset, 61% of image subtasks have more than one instance of the goal
+    category in the scene, so the referenced one was picked with probability
+    about 0.58.
+
+    The episode files give each goal ~59 `image_goals`, each a camera pose with
+    `frame_coverage` and `object_coverage`. These are SENSOR poses, not agent
+    poses -- in the first val shard an image goal sits at y = +0.58 while the
+    corresponding agent viewpoint sits at y = -0.58, i.e. about 1.17 m lower.
+    Setting the agent base to a sensor pose would therefore render from 1.41 m
+    too high. The sensor state is set directly instead, with
+    `infer_sensor_states=False` so habitat does not recompute it from the base.
+
+    Returns an embedding, or None when there is no image goal or the detector
+    does not fire on the goal class in the goal's own picture -- in which case
+    the matcher falls back to category matching.
+    """
+    gi = subtask.goal_info
+    if gi is None:
+        return None
+
+    saved = env._agent.get_state()
+    try:
+        if gi.image_goals:
+            # Best-framed view of the object.
+            best = max(gi.image_goals,
+                       key=lambda g: float(g.get("object_coverage", 0.0)))
+            st = env._agent.get_state()
+            for sensor_state in st.sensor_states.values():
+                sensor_state.position = np.asarray(
+                    best["position"], dtype=np.float64)
+                sensor_state.rotation = quaternion_from_coeffs(best["rotation"])
+            env._agent.set_state(st, infer_sensor_states=False)
+        elif gi.view_points:
+            # No pre-rendered goal views: fall back to the highest-IoU
+            # ground-truth viewpoint, which IS an agent state.
+            best = max(gi.view_points, key=lambda v: float(v.get("iou", 0.0)))
+            st = habitat_sim.AgentState()
+            st.position = np.asarray(
+                best["agent_state"]["position"], dtype=np.float64).tolist()
+            st.rotation = quaternion_from_coeffs(best["agent_state"]["rotation"])
+            env._agent.set_state(st)
+        else:
+            return None
+
+        rgb = env._make_obs().rgb
+        embed_fn = getattr(agent.perception, "embed_goal_image", None)
+        if embed_fn is None:
+            return None
+        return embed_fn(rgb, subtask.category)
+    except Exception as e:
+        # A goal picture is an optimisation, never a reason to lose a subtask --
+        # but a broad except is how a feature dies silently. If this path were
+        # broken (a renamed field, a habitat API change), every image subtask
+        # would quietly fall back to category matching and the numbers would
+        # still look plausible, which is the failure mode of engineering-log
+        # 6.46. Warn once per process so a systematic failure is visible, and
+        # record per subtask whether a goal picture was actually obtained.
+        global _IMAGE_GOAL_WARNED
+        if not _IMAGE_GOAL_WARNED:
+            _IMAGE_GOAL_WARNED = True
+            print(f"  WARNING: image-goal rendering failed "
+                  f"({type(e).__name__}: {e}); image subtasks will fall back "
+                  f"to category matching", flush=True)
+        return None
+    finally:
+        env._agent.set_state(saved)
+
+
 def run_episode(
     env: HabitatEnv,
     agent,
     episode: EpisodeSpec,
     max_steps_per_subtask: int = 500,
+    keep_memory_across_subtasks: bool = True,
 ) -> list[SubtaskResult]:
     """Run a full multi-subtask episode.
 
@@ -103,6 +201,11 @@ def run_episode(
         agent: GoatAgent instance.
         episode: episode specification with subtasks.
         max_steps_per_subtask: hard step limit per subtask.
+        keep_memory_across_subtasks: carry instance memory and the occupancy
+            map from one subtask to the next, which is the lifelong behaviour
+            under test. Setting it False is the memory-off arm of the ablation
+            in PLAN.md Section 7.10: every subtask starts from nothing, on the
+            same episodes, so the delta isolates what persistent memory buys.
 
     Returns:
         List of SubtaskResult, one per subtask.
@@ -125,11 +228,14 @@ def run_episode(
 
         # Set goal
         goal_spec = _make_goal_spec(subtask)
+        if subtask.modality == "image":
+            goal_spec.goal_embedding = _embed_image_goal(env, agent, subtask)
+        image_goal_embedded = goal_spec.goal_embedding is not None
         env.set_goal(goal_spec)
 
         # Reset agent (keep memory from previous subtasks)
         obs = env._make_obs()
-        keep_memory = (i > 0)
+        keep_memory = keep_memory_across_subtasks and (i > 0)
         agent.reset(obs, keep_memory=keep_memory)
 
         # Score against every instance that counts as this goal. Category
@@ -159,11 +265,19 @@ def run_episode(
         prev_gps = env.get_gps().copy()
         steps = 0
         done = False
+        state_steps: dict[str, int] = {}
+        ever_matched = False
 
         for step in range(max_steps_per_subtask):
             obs = env._make_obs()
             action = agent.act(obs)
             steps += 1
+
+            # Where the step budget actually went, and whether the matcher ever
+            # produced anything to go to.
+            state_name = getattr(getattr(agent, "state", None), "value", "")
+            state_steps[state_name] = state_steps.get(state_name, 0) + 1
+            ever_matched = ever_matched or getattr(agent, "_matched_node", None) is not None
 
             if action == 0:
                 done = True
@@ -191,15 +305,10 @@ def run_episode(
         ])
 
         if goal_positions:
-            # Check if goal is in view by running perception on final frame
             final_obs = env._make_obs()
-            detections = agent.perception.process(final_obs, step=steps)
-            goal_in_view = any(
-                hasattr(d, 'cls_name') and d.cls_name == subtask.category
-                for d in detections
-            )
+            camera_pose = env.get_pose()
+            intrinsics = env.intrinsics
 
-            # Closest qualifying instance decides success.
             dists = [
                 float(np.sqrt(
                     (final_pos_3d[0] - p[0]) ** 2 + (final_pos_3d[2] - p[2]) ** 2
@@ -207,20 +316,61 @@ def run_episode(
                 for p in goal_positions
             ]
             dist_to_goal = min(dists)
-            nearest = goal_positions[int(np.argmin(dists))]
 
-            success = subtask_success(
-                agent_pos=final_pos_3d,
-                goal_pos=nearest,
-                goal_in_view=goal_in_view,
+            # ANY valid instance that is both inside the radius and visible
+            # satisfies the criterion. Testing only the nearest one fails a stop
+            # that has a second valid instance of the category squarely in frame
+            # at 0.9 m -- and the dev subset has a median of 4 instances of a
+            # goal category per scene.
+            success = False
+            goal_in_view = False
+            for pos, d in zip(goal_positions, dists):
+                visible = instance_in_view(
+                    np.asarray(pos), camera_pose, intrinsics, final_obs.depth
+                )
+                goal_in_view = goal_in_view or visible
+                if subtask_success(
+                    agent_pos=final_pos_3d, goal_pos=np.asarray(pos),
+                    goal_in_view=visible,
+                ):
+                    success = True
+                    break
+
+            # Reported alongside, never scored: does the agent's detector agree?
+            detections = agent.perception.process(final_obs, step=steps)
+            detector_in_view = any(
+                hasattr(d, 'cls_name') and d.cls_name == subtask.category
+                for d in detections
             )
         else:
             # Genuinely no ground truth for this subtask — cannot be scored.
             success = False
             goal_in_view = False
+            detector_in_view = False
             dist_to_goal = float("inf")
 
         spl = compute_spl(success, shortest_path, actual_path)
+
+        # How far the node the agent finally believed in was from a real
+        # instance. Small with a failure means the stop rule; large means the
+        # matcher committed to the wrong object.
+        node_error = float("nan")
+        matched = getattr(agent, "_matched_node", None)
+        if matched is not None and goal_positions:
+            mp = np.asarray(matched.world_xyz)
+            node_error = min(
+                float(np.sqrt((mp[0] - p[0]) ** 2 + (mp[2] - p[2]) ** 2))
+                for p in goal_positions
+            )
+
+        explored_m2 = 0.0
+        smap = getattr(agent, "semantic_map", None)
+        if smap is not None:
+            try:
+                res = smap._resolution
+                explored_m2 = float(smap.get_explored().sum()) * res * res
+            except Exception:
+                pass
 
         # Determine failure reason
         if success:
@@ -245,6 +395,14 @@ def run_episode(
             shortest_path_length=shortest_path,
             reason=reason,
             wall_time_s=wall_time,
+            detector_in_view=detector_in_view,
+            ever_matched=ever_matched,
+            node_error_m=node_error,
+            steps_searching=state_steps.get("searching", 0),
+            steps_approaching=state_steps.get("approaching", 0),
+            steps_verifying=state_steps.get("verifying", 0),
+            explored_m2=explored_m2,
+            image_goal_embedded=image_goal_embedded,
         ))
 
     return results

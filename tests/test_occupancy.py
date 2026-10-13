@@ -251,3 +251,47 @@ class TestOutOfVocabularyDetections:
         sm = SemanticMap(size_m=24.0, resolution_m=0.05, num_classes=37)
         sm.update_from_detections([self._inst(i) for i in range(0, 36, 7)])
         assert sm.dropped_cls_ids == set()
+
+
+class TestClear:
+    """SemanticMap had no clear(), so GoatAgent.reset(keep_memory=False) was a
+    documented no-op and the map leaked across every episode in a scene."""
+
+    def _explored_map(self):
+        sm = SemanticMap(size_m=24.0, resolution_m=0.05)
+        pose = _identity_pose()
+        pose[1, 3] = 1.0
+        sm.update_from_depth(np.full((256, 256), 3.0, dtype=np.float32),
+                             pose, _make_K())
+        return sm
+
+    def test_clear_resets_every_grid(self):
+        sm = self._explored_map()
+        assert sm.get_explored().any()
+        assert np.any(sm.get_occupancy() != -1)
+
+        sm.clear()
+        assert (sm.get_occupancy() == -1).all()
+        assert not sm.get_explored().any()
+        assert (sm.get_class_counts() == 0).all()
+
+    def test_clear_keeps_the_scene_geometry(self):
+        """The grid is sized and centred on the scene bounds -- measured over
+        the 36 val scenes, 18 do not fit a default window on the world origin.
+        Clearing must not silently move it back there."""
+        sm = SemanticMap(size_m=8.0, resolution_m=0.05, origin=(-3.0, 11.0))
+        before = sm.world_to_grid(np.array([0.0, 12.0]))
+        shape = sm.get_occupancy().shape
+
+        sm.clear()
+        assert sm.world_to_grid(np.array([0.0, 12.0])) == before
+        assert sm.get_occupancy().shape == shape
+
+    def test_map_is_usable_after_clear(self):
+        sm = self._explored_map()
+        sm.clear()
+        pose = _identity_pose()
+        pose[1, 3] = 1.0
+        sm.update_from_depth(np.full((256, 256), 3.0, dtype=np.float32),
+                             pose, _make_K())
+        assert sm.get_explored().any()

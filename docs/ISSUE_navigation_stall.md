@@ -2,6 +2,10 @@
 
 **Labels:** `bug`, `navigation`, `week-9`
 **Blocks:** Week 9 done-criteria (`SR > 0` on the 30-episode dev eval)
+**Status: CLOSED 2026-10-13** — see *Resolution* below. None of it was a
+navigation defect: two were in the stop decision, one was in the success
+criterion itself, and the `path = 0.00 m` mystery was an unreachable goal being
+re-approached until the step budget ran out.
 
 ## Summary
 
@@ -58,30 +62,65 @@ and `distance_to_goal` around 1.2 m on the closest subtasks.
 - **Camera convention** — 100% of reconstructed points now land in front of
   the agent (was 0%).
 
-## Leading hypotheses
+## Resolution (2026-10-13)
 
-1. **Instance position error.** Memory node positions come from back-projecting
-   the detection bbox centre. Measured error against ground truth was ~3 m
-   before the camera-convention fix and has not been re-measured since. If a
-   node sits >1 m from the real object, the agent can arrive at its *estimate*
-   and still be outside the success radius — which matches subtasks stalling at
-   1.16–1.20 m.
-2. **VERIFYING never completes.** The FSM only stops when `_goal_in_view`
-   confirms a detection matching the node's class in the final frame. With
-   detector recall at 0.149 mAP50, the object may simply not be detected from
-   the arrival pose even when it is visible.
-3. **The remaining `path=0.00 m` subtasks.** Distinct from the above; the agent
-   is stationary for 500 steps. Cause unknown — the two previous explanations
-   (orbiting a waypoint, unhandled collisions) are both fixed and verified.
+All three hypotheses are settled. The headline is that **none of them was a
+navigation problem**, which is why no amount of navigation tuning moved the
+number.
 
-## Recommended next step
+**1. Instance position error — not the cause.** Traced on episode 24 subtask 2:
+the matched memory node sat **0.15 m** from the true mirror, and pure pursuit
+delivered the agent to **0.19 m** of it. Memory and control were both fine. The
+error is now recorded per subtask as `node_error_m`, so this is measured rather
+than assumed from here on.
 
-**Build the top-down visualiser before attempting another fix.** All 14 bugs so
-far were found by printing numbers, and three regressions were introduced by
-tuning constants against a 12-minute end-to-end eval. A single frame showing the
-occupancy map, the planned path, the agent's actual track, the memory nodes and
-the ground-truth goal position would very likely explain the last metre
-immediately. `scripts/make_video.py` exists as a starting point.
+**2. VERIFYING never completes — confirmed, and it had three separate causes**
+(engineering log 6.35–6.37):
+
+- VERIFYING issued **forward** while already inside the success radius, pressing
+  the agent nose-to-surface against the wall a wall-mounted goal hangs on, which
+  pushed the object out of frame.
+- The 5-step budget was **geometrically impossible**: one turn is 30°, so it
+  could not bring a goal more than 150° off-axis into frame.
+- Expiry was a **livelock** — reverting to APPROACHING while still inside the
+  radius re-entered VERIFYING with the counter reset. Measured at 32 of 40
+  ticks.
+
+And the deeper reason the stop never fired: **the scorer was asking the agent's
+own detector** whether the goal was visible, which is not the benchmark's
+criterion, while the detector fires from only 9% of poses at 0.8 m against 34%
+at 1.5 m. Success *requires* a stop inside 1.0 m, so correct arrivals were
+rejected roughly nine times in ten. Verification now turns to face the node,
+closes to 0.8 of the success distance, and commits on accumulated memory.
+
+**3. The `path = 0.00 m` subtasks — solved** (engineering log 6.47). This was
+the most persistent one and it was never a motion problem at all. Over the first
+125 subtasks of the 2026-10-13 dev eval, **28 (22.4%)** ran the full 500 steps
+having moved less than 0.01 m, with **zero** successes. The distribution over
+subtask index gave it away: 1 through 7 and **never 0**, because subtask 0
+starts with empty memory and so has no remembered node to get stuck on.
+
+When A\* could not reach the matched node, the approach give-up cleared
+`_matched_node` *without rejecting it*, so the matcher returned the same node on
+the next tick — APPROACHING, four failed plans, SEARCHING, re-match, for the
+whole budget, turning in place throughout. Reproduced in closed loop at 500
+ticks / 499 turns / 0.000 m moved, and after routing the give-up through
+`_reject_matched_node()`: **15 ticks**, 3 in APPROACHING, node rejected.
+
+## Status
+
+**Closed.** The first scored successes followed these fixes; `SR` is no longer
+0%. The remaining failure mode is different and is tracked in the engineering
+log rather than here: with the stop decision working, most failures are now
+*never reaching the goal*, and the binding constraints are detector recall at
+close range (6.35), vertical framing inside the success radius (6.42) and
+instance ambiguity for the single-instance modalities (6.43).
+
+## Note on the recommended next step
+
+The advice below — *build the visualiser before attempting another fix* — was
+followed and was correct: it found two substantial bugs in two frames
+(6.28–6.29). Worth keeping as a record of what the recommendation bought.
 
 ## Related
 
