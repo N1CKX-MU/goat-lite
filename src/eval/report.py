@@ -129,7 +129,11 @@ def save_results(
     ]
     summary = aggregate_metrics(agg_input)
     summary["total_subtasks"] = len(results)
-    summary["total_episodes"] = len(set(r.episode_id for r in results))
+    # Count episodes by their subtask 0, not by distinct episode_id: GOAT-Bench
+    # numbers episodes per scene, so 218 dev subtasks share only 86 distinct
+    # (episode_id, subtask_index) pairs and 30 episodes reported as 10 (6.46).
+    # Every episode contributes exactly one subtask_index == 0.
+    summary["total_episodes"] = sum(1 for r in results if r.subtask_index == 0)
     summary["avg_steps"] = sum(r.steps_taken for r in results) / max(len(results), 1)
     summary["avg_wall_time_s"] = sum(r.wall_time_s for r in results) / max(len(results), 1)
     # Success is scored on the benchmark's geometric visibility test. This is

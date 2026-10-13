@@ -181,9 +181,11 @@ def report(results_dir: str) -> str:
         summary = json.load(open(summary_path))
 
     n = len(rows)
+    # Episodes are counted by their subtask 0: episode ids repeat across scenes
+    # (6.46), so a distinct-id count reports 30 episodes as 10.
+    n_episodes = sum(1 for r in rows if r["subtask_index"] == 0)
     out = [f"# Failure taxonomy — `{results_dir}`\n",
-           f"{n} subtasks over "
-           f"{len(set(r['episode_id'] for r in rows))} episodes.\n"]
+           f"{n} subtasks over {n_episodes} episodes.\n"]
 
     out.append(_table(
         "Headline", ("metric", "value"),

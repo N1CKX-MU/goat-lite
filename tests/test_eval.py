@@ -362,3 +362,30 @@ class TestResumablePrefix:
     def test_nothing_on_disk(self):
         from src.eval.report import resumable_prefix
         assert resumable_prefix([], [[("0", 0)]]) == ([], 0)
+
+
+class TestEpisodeCounting:
+    def test_counts_episodes_that_share_an_id(self, tmp_path):
+        """Episode ids repeat across scenes, so a distinct-id count undercounts.
+        Each episode contributes exactly one subtask_index == 0."""
+        import json as _json
+        from src.eval.report import save_results
+        from src.eval.runner import SubtaskResult
+
+        def row(ep, idx):
+            return SubtaskResult(
+                episode_id=ep, subtask_index=idx, category="rug",
+                modality="image", success=False, spl=0.0,
+                distance_to_goal=2.0, steps_taken=500,
+                actual_path_length=1.0, shortest_path_length=1.0,
+                reason="timeout",
+            )
+
+        # Three different scenes, every one of them calling its episode "9".
+        results = [row("9", 0), row("9", 1),
+                   row("9", 0), row("9", 1),
+                   row("9", 0)]
+        save_results(results, str(tmp_path))
+        summary = _json.loads((tmp_path / "summary.json").read_text())
+        assert summary["total_episodes"] == 3
+        assert summary["total_subtasks"] == 5
