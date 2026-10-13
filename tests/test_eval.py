@@ -246,3 +246,58 @@ class TestSaveResults:
         lines = (tmp_path / "failures.jsonl").read_text().strip().splitlines()
         assert len(lines) == 1
         assert _json.loads(lines[0])["reason"] == "timeout"
+
+
+class TestResumeRoundTrip:
+    def test_load_results_reads_back_what_save_wrote(self, tmp_path):
+        from src.eval.report import save_results, load_results
+        from src.eval.runner import SubtaskResult
+
+        original = [
+            SubtaskResult(
+                episode_id="7", subtask_index=2, category="mirror",
+                modality="category", success=True, spl=0.5,
+                distance_to_goal=0.8, steps_taken=40,
+                actual_path_length=5.0, shortest_path_length=4.0,
+                reason="success", wall_time_s=9.0, detector_in_view=True,
+                ever_matched=True, node_error_m=0.15,
+                steps_searching=10, steps_approaching=25, steps_verifying=5,
+                explored_m2=42.5,
+            ),
+        ]
+        save_results(original, str(tmp_path))
+        back = load_results(str(tmp_path))
+
+        assert len(back) == 1
+        r = back[0]
+        assert r.episode_id == "7" and r.subtask_index == 2
+        assert r.success is True and r.detector_in_view is True
+        assert r.steps_taken == 40
+        assert abs(r.node_error_m - 0.15) < 1e-9
+        assert abs(r.explored_m2 - 42.5) < 1e-9
+
+    def test_load_results_is_empty_without_a_file(self, tmp_path):
+        from src.eval.report import load_results
+        assert load_results(str(tmp_path)) == []
+
+    def test_load_results_tolerates_a_missing_column(self, tmp_path):
+        """A CSV written before a diagnostic field existed must still resume."""
+        import csv as _csv
+        from src.eval.report import load_results
+        with open(tmp_path / "results.csv", "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=[
+                "episode_id", "subtask_index", "category", "modality",
+                "success", "spl", "distance_to_goal", "steps_taken",
+                "actual_path_length", "shortest_path_length", "reason",
+                "wall_time_s"])
+            w.writeheader()
+            w.writerow(dict(
+                episode_id="1", subtask_index=0, category="rug",
+                modality="image", success="False", spl="0.0",
+                distance_to_goal="3.0", steps_taken="500",
+                actual_path_length="7.0", shortest_path_length="5.0",
+                reason="timeout", wall_time_s="30.0"))
+        back = load_results(str(tmp_path))
+        assert len(back) == 1
+        assert back[0].detector_in_view is False   # default
+        assert back[0].ever_matched is False

@@ -28,7 +28,7 @@ from src.memory.instance_db import InstanceDatabase
 from src.matching.goal_matcher import GoalMatcher
 from src.agent.goat_agent import GoatAgent
 from src.eval.runner import run_episode, _resolve_scene_path
-from src.eval.report import save_results
+from src.eval.report import save_results, load_results
 
 
 def build_agent(
@@ -87,6 +87,9 @@ def main():
     parser.add_argument("--hm3d-root", type=str, default="data/hm3d")
     parser.add_argument("--dataset-root", type=str,
                         default="data/datasets/goat_bench/hm3d/v1/val_unseen")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip scenes already complete in the output "
+                             "directory's results.csv and keep their rows")
     parser.add_argument("--min-observations", type=int, default=2,
                         help="times an instance must be seen before the "
                              "matcher will target it (1 disables the gate)")
@@ -118,9 +121,34 @@ def main():
 
     all_results = []
     scene_count = 0
+    done_keys: set = set()
+
+    if args.resume:
+        # Resume at SCENE granularity, never mid-episode: memory and the map
+        # persist across the subtasks of an episode, so replaying half an
+        # episode would start it from state it never had.
+        all_results = load_results(args.output_dir)
+        done_keys = {(r.episode_id, r.subtask_index) for r in all_results}
+        if all_results:
+            print(f"  Resuming: {len(all_results)} subtasks already on disk")
 
     for scene_id, scene_episodes in by_scene.items():
         scene_count += 1
+        expected = {(ep.episode_id, i)
+                    for ep in scene_episodes
+                    for i in range(len(ep.subtasks))}
+        if expected and expected <= done_keys:
+            print(f"\n[{scene_count}/{len(by_scene)}] Skipping (already done): "
+                  f"{scene_id.split('/')[-2]}")
+            continue
+        if expected & done_keys:
+            # Partial scene: drop its rows and redo it whole, so every episode
+            # in the output was run with the memory history it should have had.
+            print(f"\n[{scene_count}/{len(by_scene)}] Partial, redoing scene")
+            all_results = [r for r in all_results
+                           if (r.episode_id, r.subtask_index) not in expected]
+            done_keys -= expected
+
         scene_path = _resolve_scene_path(scene_id, args.hm3d_root)
         print(f"\n[{scene_count}/{len(by_scene)}] Loading scene: {scene_path}")
 

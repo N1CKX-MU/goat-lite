@@ -11,6 +11,45 @@ from src.eval.runner import SubtaskResult
 from src.eval.metrics import aggregate_metrics
 
 
+def load_results(output_dir: str) -> list[SubtaskResult]:
+    """Read back a previous run's results.csv as SubtaskResult objects.
+
+    Used by --resume. A dev eval takes hours, and losing a nearly complete run
+    to a crash on the last scene is not acceptable; results are already
+    checkpointed per scene, and this is the other half of that.
+
+    Rows are matched to the dataclass by field name and converted by the
+    declared type, so a CSV written before a field existed still loads (the
+    missing field keeps its default).
+    """
+    path = os.path.join(output_dir, "results.csv")
+    if not os.path.exists(path):
+        return []
+
+    types = {f.name: f.type for f in fields(SubtaskResult)}
+
+    def _coerce(name: str, raw: str):
+        t = types.get(name, "str")
+        if t == "bool" or t is bool:
+            return raw == "True"
+        if t == "int" or t is int:
+            return int(float(raw))
+        if t == "float" or t is float:
+            return float(raw)
+        return raw
+
+    out = []
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            kwargs = {k: _coerce(k, v) for k, v in row.items()
+                      if k in types and v != ""}
+            try:
+                out.append(SubtaskResult(**kwargs))
+            except TypeError:
+                continue  # a row missing a required field is not resumable
+    return out
+
+
 def save_results(
     results: list[SubtaskResult],
     output_dir: str,
