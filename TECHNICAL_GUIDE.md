@@ -2963,3 +2963,79 @@ it became clear the harness never updated the compass, so of course the agent
 turned forever. With a real motion model the same scenes terminate normally
 (16-122 ticks, 0.25-2.10 m moved). The lesson is the same one as 6.33: an open
 loop will confirm almost any theory about a controller.
+
+#### 6.48 The first full development evaluation, and what it says
+
+218 subtasks, 30 episodes, 22 scenes, 500 steps each. Both arms ran from a
+worktree pinned at the behavioural commit with only the frontier optimisation
+(6.44) and the harness overlaid, so the two are directly comparable and neither
+includes the fixes made later the same day.
+
+| | memory-on | memory-off |
+|---|---|---|
+| SR | **2.8%** (6/218) | 2.3% (5/218) |
+| SPL | 0.026 | 0.015 |
+| SR where the detector also fired at the stop | 0.5% | 1.4% |
+| median final distance to goal | 4.49 m | 4.47 m |
+| subtasks that called STOP at all | 30.3% | — |
+
+By modality (memory-on): category 3.7%, language 4.3%, **image 0.0%**. By
+category, every success is a `mirror` (7.5% of 40), a `picture` (7.4% of 27) or
+a `microwave` (7.1% of 14) -- the three the detector can see. Everything else is
+0%, including **all 20 `rug` subtasks**, which 6.42 predicts geometrically.
+
+**The ablation is inconclusive, and saying so is the result.** Six successes
+against five is not a difference; +0.5 pp carries no information at this rate.
+The per-index deltas look encouraging for the lifelong hypothesis at the tail
+(+5.9, +6.7 and +16.7 pp at indices 6, 7 and 9, against memory-off winning at
+1, 2 and 5) but every one of those is a single subtask. SPL favours memory-on by
+73%, which sounds like independent support and is not: SPL is zero for every
+failure, so it is driven by the same six successes.
+
+The honest reading is the hypothesis stated in the report's Section 1.5 --
+memory as an *amplifier* of perception precision. Below some precision
+threshold there is nothing to amplify, and that is where this operating point
+sits. The ablation should be re-run once SR is high enough for a delta to be
+resolvable; running it now was still worth it, because it establishes that
+memory is not *hurting* and that the harness can produce the comparison.
+
+**PLAN.md Section 7.10's criterion "delta > 0 (if not, memory is broken)" is
+technically met and should not be treated as met.** The number is +0.5 pp on
+n=218 with 11 total successes.
+
+#### 6.49 A smoke run on the fixed code, and two things it exposed
+
+Seventeen subtasks on the post-fix `HEAD`, as a check that the day's later
+changes work in the simulator rather than only in tests.
+
+**The unreachable-goal fix holds.** Subtasks stationary for the full 500 steps:
+**0 of 17**, against 22.4% before 6.47. The per-state step counters show where
+the budget goes now -- `499/0/0` across SEARCHING for subtasks with no
+candidate, `0/499/0` across APPROACHING for subtasks with one -- which is the
+instrumentation doing its job.
+
+**Image goals: the detector cannot read the benchmark's own goal pictures.**
+0 of 5 image goals produced an embedding. No exception: `embed_goal_image` ran
+and the detector simply never fired on the goal class in the goal's *own*
+reference view. The reason is 6.35 again, from the other side -- a GOAT-Bench
+image goal has `object_coverage` around **0.89**, so the object fills the frame,
+and that is exactly the regime the detector fails in.
+
+That same number makes the detector unnecessary there: **a frame its object
+fills is already an object crop**, so it is distribution-matched to a node
+embedding without any cropping. The silent-detector branch now embeds the frame
+whole instead of returning None, keeping the detector path for the minority of
+goal views that are wider shots. Without this, image-goal matching was dead on
+arrival in exactly the way 6.46 warns about -- working code, plausible numbers,
+feature never active.
+
+**And a confirmation of 6.42 costing real successes.** One subtask
+(`image/dresser`) stopped at step 1, **0.67 m** from a true dresser, with a node
+error of 0.455 m -- inside the radius, facing it -- and scored a **failure**
+because the geometric visibility test said the instance was not in frame. 6.42's
+table gives `dresser` a median required standoff of **0.98 m**: at 0.67 m the
+centroid is outside the vertical FOV. The agent did everything the criterion
+asks except stand far enough back, and nothing in the stop rule knows that
+standing closer can *lose* a subtask. A standoff that depends on the goal's
+height offset is the obvious next change, and it is now measured rather than
+guessed.

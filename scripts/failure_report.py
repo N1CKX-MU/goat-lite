@@ -240,16 +240,34 @@ def report(results_dir: str) -> str:
 
 
 def compare(a_dir: str, b_dir: str) -> str:
-    """Side-by-side for the memory on/off ablation."""
-    a, b = _load(a_dir), _load(b_dir)
-    # Only subtasks present in both arms, so the delta is on identical work.
-    key = lambda r: (r["episode_id"], r["subtask_index"])
-    common = {key(r) for r in a} & {key(r) for r in b}
-    a = [r for r in a if key(r) in common]
-    b = [r for r in b if key(r) in common]
+    """Side-by-side for the memory on/off ablation.
 
+    Arms are paired POSITIONALLY, not by (episode_id, subtask_index). Those
+    pairs are not unique -- GOAT-Bench numbers episodes per scene, so 218 dev
+    subtasks share only 86 distinct pairs (engineering log 6.46). Keying on them
+    silently collapsed a 218-subtask comparison to 86 rows and paired subtasks
+    from different scenes with each other.
+
+    Both arms walk the same deterministic subset in the same scene order, so row
+    i of one arm is the same subtask as row i of the other. That is checked
+    rather than assumed: the pairing stops at the first position where the two
+    arms disagree about which subtask it is.
+    """
+    a, b = _load(a_dir), _load(b_dir)
+    n = min(len(a), len(b))
+    key = lambda r: (r["episode_id"], r["subtask_index"], r["category"],
+                     r["modality"])
+    paired = 0
+    while paired < n and key(a[paired]) == key(b[paired]):
+        paired += 1
+    a, b = a[:paired], b[:paired]
+
+    note = ""
+    if paired < max(len(_load(a_dir)), len(_load(b_dir))):
+        note = (f" Pairing stopped at position {paired}: the arms diverge "
+                f"beyond it, so only the verified prefix is compared.")
     out = [f"\n# Ablation — `{a_dir}` vs `{b_dir}`\n",
-           f"{len(common)} subtasks present in both arms.\n"]
+           f"{paired} subtasks paired position-by-position.{note}\n"]
     rows = [("SR", f"{_rate(a):.1f}%", f"{_rate(b):.1f}%",
              f"{_rate(a) - _rate(b):+.1f} pp"),
             ("SPL", f"{sum(r['spl'] for r in a) / max(len(a), 1):.3f}",

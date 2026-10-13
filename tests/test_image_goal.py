@@ -240,11 +240,71 @@ class TestDegradesToNone:
         assert _embed_image_goal(env, FakeAgentWrapper(Bare()),
                                  _subtask(gi)) is None
 
-    def test_detector_silent_on_the_goal_picture(self):
-        """The detector not firing on the goal's own picture is a legitimate
-        outcome: there is then nothing honest to compare against."""
+    def test_perception_returning_none_degrades_cleanly(self):
         gi = _goal_info(image_goals=[_image_goal((1.0, 0.6, 1.0), 0.5)])
         env = FakeEnv()
         assert _embed_image_goal(
             env, FakeAgentWrapper(FakePerception(result=None)),
             _subtask(gi)) is None
+
+
+class TestGoalViewEmbedding:
+    """PerceptionPipeline.embed_goal_image, where the detector-crop decision is.
+
+    Measured on a HEAD smoke run: 0 of 5 image goals produced a detection of
+    the goal class in the goal's own picture, because a GOAT-Bench image goal
+    has object_coverage around 0.89 and the detector is blind when an object
+    fills the frame (6.35). The same statistic is why embedding the frame whole
+    is sound: a frame its object fills is already an object crop.
+    """
+
+    class _Det:
+        def __init__(self, dets=()):
+            self.dets = list(dets)
+        def detect(self, rgb):
+            return self.dets
+
+    class _Enc:
+        def __init__(self):
+            self.seen = []
+        def encode_image(self, crops):
+            self.seen.append(crops[0].shape)
+            return np.ones((1, 4), dtype=np.float32)
+
+    class _Box:
+        def __init__(self, cls_name, conf, bbox):
+            self.cls_name, self.conf, self.bbox = cls_name, conf, bbox
+
+    def _pipeline(self, dets):
+        from src.perception.pipeline import PerceptionPipeline
+        enc = self._Enc()
+        return PerceptionPipeline(self._Det(dets), enc, np.eye(3)), enc
+
+    def test_embeds_the_whole_frame_when_the_detector_is_silent(self):
+        pipe, enc = self._pipeline([])
+        rgb = np.full((200, 200, 3), 5, np.uint8)
+
+        out = pipe.embed_goal_image(rgb, "microwave")
+
+        assert out is not None, "a silent detector must not kill image matching"
+        assert enc.seen[0] == (200, 200, 3), "should embed the frame whole"
+
+    def test_crops_to_the_detector_box_when_it_does_fire(self):
+        pipe, enc = self._pipeline([
+            self._Box("microwave", 0.4, (10, 10, 90, 90)),
+            self._Box("microwave", 0.8, (20, 20, 150, 160)),   # best
+            self._Box("rug", 0.9, (0, 0, 199, 199)),           # wrong class
+        ])
+        rgb = np.full((200, 200, 3), 5, np.uint8)
+
+        pipe.embed_goal_image(rgb, "microwave")
+
+        assert enc.seen[0] == (140, 130, 3), "should use the best box of the class"
+
+    def test_ignores_boxes_below_the_minimum_crop_size(self):
+        pipe, enc = self._pipeline([self._Box("microwave", 0.9, (0, 0, 8, 8))])
+        rgb = np.full((200, 200, 3), 5, np.uint8)
+
+        pipe.embed_goal_image(rgb, "microwave")
+
+        assert enc.seen[0] == (200, 200, 3), "tiny box -> fall back to the frame"

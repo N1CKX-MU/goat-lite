@@ -56,11 +56,12 @@ class PerceptionPipeline:
         a node embedding is a tight box around an object.
 
         Running the detector on the goal view and cropping its best box of the
-        goal class makes both sides identical by construction. If the detector
-        does not fire on the goal class, there is nothing honest to compare and
-        the caller falls back to category matching.
+        goal class makes both sides identical by construction. When it does not
+        fire -- which measurement says is the common case, because a goal view
+        is already filled by its object -- the frame is embedded whole, which is
+        distribution-matched for the same reason.
 
-        Returns an L2-normalised embedding, or None.
+        Returns an L2-normalised embedding, or None only if encoding fails.
         """
         detections = self._detector.detect(rgb)
         h, w = rgb.shape[:2]
@@ -76,7 +77,22 @@ class PerceptionPipeline:
             if det.conf > best_conf:
                 best, best_conf = (x1, y1, x2, y2), det.conf
         if best is None:
-            return None
+            # The detector did not fire on the goal class in the goal's own
+            # picture. Measured on a HEAD smoke run, that is the NORMAL case:
+            # 0 of 5 image goals produced a detection, for the reason in 6.35 --
+            # a GOAT-Bench image goal has object_coverage around 0.89, so the
+            # object fills the frame, and that is precisely the regime where the
+            # detector is blind (it fires from 9% of poses at 0.8 m against 34%
+            # at 1.5 m).
+            #
+            # But that same statistic makes the detector unnecessary here: a
+            # frame the object already fills IS an object crop, so it is
+            # distribution-matched to a node embedding without cropping. Embed
+            # it whole rather than giving up, and keep the detector path for the
+            # minority of goal views that are wider shots, where it tightens the
+            # crop.
+            embeds = self._encoder.encode_image([rgb])
+            return embeds[0] if len(embeds) else None
         x1, y1, x2, y2 = best
         embeds = self._encoder.encode_image([rgb[y1:y2, x1:x2]])
         return embeds[0] if len(embeds) else None

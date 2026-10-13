@@ -389,3 +389,63 @@ class TestEpisodeCounting:
         summary = _json.loads((tmp_path / "summary.json").read_text())
         assert summary["total_episodes"] == 3
         assert summary["total_subtasks"] == 5
+
+
+class TestAblationPairing:
+    """The ablation delta is only meaningful if the two arms are paired on the
+    SAME subtasks. (episode_id, subtask_index) is not unique across a run, so
+    keying on it collapsed a 218-subtask comparison to 86 rows."""
+
+    def _write(self, d, rows):
+        import csv as _csv
+        from dataclasses import asdict, fields
+        from src.eval.runner import SubtaskResult
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "results.csv", "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=[x.name for x in
+                                               fields(SubtaskResult)])
+            w.writeheader()
+            for r in rows:
+                w.writerow(asdict(r))
+
+    def _row(self, ep, idx, cat, success):
+        from src.eval.runner import SubtaskResult
+        return SubtaskResult(
+            episode_id=ep, subtask_index=idx, category=cat, modality="category",
+            success=success, spl=1.0 if success else 0.0,
+            distance_to_goal=0.5 if success else 5.0, steps_taken=50,
+            actual_path_length=1.0, shortest_path_length=1.0,
+            reason="success" if success else "timeout",
+        )
+
+    def test_pairs_every_subtask_despite_repeated_ids(self, tmp_path):
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        from scripts.failure_report import compare
+
+        # Two scenes, both calling their episode "9" with two subtasks each.
+        a = [self._row("9", 0, "mirror", True), self._row("9", 1, "rug", False),
+             self._row("9", 0, "mirror", True), self._row("9", 1, "rug", False)]
+        b = [self._row("9", 0, "mirror", False), self._row("9", 1, "rug", False),
+             self._row("9", 0, "mirror", False), self._row("9", 1, "rug", False)]
+        self._write(tmp_path / "a", a)
+        self._write(tmp_path / "b", b)
+
+        text = compare(str(tmp_path / "a"), str(tmp_path / "b"))
+        assert "4 subtasks paired" in text, text.splitlines()[:4]
+
+    def test_stops_where_the_arms_diverge(self, tmp_path):
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        from scripts.failure_report import compare
+
+        a = [self._row("9", 0, "mirror", True), self._row("9", 1, "rug", False)]
+        b = [self._row("9", 0, "mirror", False), self._row("9", 1, "vase", False)]
+        self._write(tmp_path / "a", a)
+        self._write(tmp_path / "b", b)
+
+        text = compare(str(tmp_path / "a"), str(tmp_path / "b"))
+        assert "1 subtasks paired" in text
+        assert "diverge" in text
