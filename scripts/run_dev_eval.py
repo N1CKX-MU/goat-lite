@@ -36,6 +36,7 @@ def build_agent(
     device: str = "cuda",
     camera_height: float = 1.41,
     scene_bounds: tuple = None,
+    min_observations: int = 2,
 ) -> GoatAgent:
     """Build the full agent with all subsystems.
 
@@ -43,12 +44,19 @@ def build_agent(
     given, the occupancy grid is sized and centred on the scene; without it the
     map falls back to a 24 m window on the world origin, which does not contain
     18 of the 36 val scenes.
+
+    ``min_observations`` is the evidence a remembered instance needs before the
+    matcher will target it. It is a sweep axis, so it is threaded through rather
+    than left at the GoalMatcher default.
+
+    NOTE: this does not read configs/agent_default.yaml. The defaults here are
+    the effective configuration at eval time.
     """
     detector = YOLODetector(device=device)
     encoder = ClipEncoder(device=device)
     perception = PerceptionPipeline(detector, encoder, intrinsics)
     memory = InstanceDatabase()
-    matcher = GoalMatcher(encoder)
+    matcher = GoalMatcher(encoder, min_observations=min_observations)
     # camera_height lets the map derive the floor from the camera pose instead
     # of assuming floor Y == 0, which no HM3D scene satisfies.
     if scene_bounds is not None:
@@ -79,6 +87,9 @@ def main():
     parser.add_argument("--hm3d-root", type=str, default="data/hm3d")
     parser.add_argument("--dataset-root", type=str,
                         default="data/datasets/goat_bench/hm3d/v1/val_unseen")
+    parser.add_argument("--min-observations", type=int, default=2,
+                        help="times an instance must be seen before the "
+                             "matcher will target it (1 disables the gate)")
     parser.add_argument("--no-memory", action="store_true",
                         help="memory-off arm of the ablation: clear instance "
                              "memory and the map before every subtask instead "
@@ -121,7 +132,8 @@ def main():
 
         intrinsics = env.intrinsics
         agent = build_agent(
-            intrinsics, device=args.device, scene_bounds=env.get_scene_bounds()
+            intrinsics, device=args.device, scene_bounds=env.get_scene_bounds(),
+            min_observations=args.min_observations,
         )
 
         for ep in scene_episodes:

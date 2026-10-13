@@ -15,11 +15,30 @@ class GoalMatcher:
         category_threshold: float = 0.0,
         language_threshold: float = 0.24,
         use_template: bool = True,
+        min_observations: int = 2,
+        trust_confidence: float = 0.5,
     ):
+        """
+        Args:
+            min_observations: how many times an instance must have been seen
+                before it may be targeted. Detector ``conf`` is 0.15, because
+                at 0.35 the agent saw nothing in four frames out of five, and
+                the price of that recall is false positives in memory. A node
+                built from one weak detection should not be a navigation goal:
+                the agent navigates to it, and because the node carries the
+                detector's own label the same false detection confirms it on
+                arrival. Set to 1 to disable the gate.
+            trust_confidence: a single sighting this confident is targetable
+                regardless of ``min_observations``. Starving the matcher is its
+                own failure mode on a recall-limited detector, and probing true
+                goal instances produced confidences from 0.22 to 0.93.
+        """
         self._encoder = encoder
         self._category_threshold = category_threshold
         self._language_threshold = language_threshold
         self._use_template = use_template
+        self._min_observations = min_observations
+        self._trust_confidence = trust_confidence
 
     def match(
         self,
@@ -51,11 +70,17 @@ class GoalMatcher:
         else:
             return None, 0.0
 
-    @staticmethod
-    def _eligible(nodes, exclude_ids):
-        if not exclude_ids:
-            return nodes
-        return [n for n in nodes if n.node_id not in exclude_ids]
+    def _eligible(self, nodes, exclude_ids):
+        """Nodes this matcher is willing to hand back as a navigation target."""
+        out = []
+        for n in nodes:
+            if exclude_ids and n.node_id in exclude_ids:
+                continue
+            if (n.n_observations < self._min_observations
+                    and n.confidence < self._trust_confidence):
+                continue
+            out.append(n)
+        return out
 
     def _match_category(
         self,
