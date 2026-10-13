@@ -954,10 +954,13 @@ matching, and deployment on physical hardware.
 
 ## Appendices *(to be assembled)*
 
-- **A — Engineering log.** 32 dated findings with the measurement that produced
+- **A — Engineering log.** 47 dated findings with the measurement that produced
   each, in `TECHNICAL_GUIDE.md` §6, including negative results and failed fixes.
 - **B — Reproduction.** Environment, commands and locally runnable episodes, in
   `docs/DEMO.md`.
-- **C — Full hyperparameter table.** *Pending.*
+- **C — Full hyperparameter table.** `configs/agent_default.yaml`, which
+  mirrors the constructor defaults that actually run and is held to them by
+  `tests/test_config.py`; each measured value is annotated with the
+  engineering-log section that produced it.
 - **D — Per-scene and per-category results.** *Pending the development evaluation.*
 - **E — Individual contribution statement.** *Pending.*
