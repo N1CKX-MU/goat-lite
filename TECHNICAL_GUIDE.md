@@ -2906,3 +2906,60 @@ A related habit worth recording, from the same hour: `pkill -f run_dev_eval.py`
 killed the shell that ran it. `pkill -f` matches against full command lines, and
 the pattern appears in the command line of the very shell issuing it. Use
 `pgrep -x python` (exact process name) or kill by collected PID.
+
+#### 6.47 An unreachable goal burned the whole step budget (22.4% of subtasks)
+
+Found in the dev eval while it was still running. Over the first 125 subtasks:
+
+| | |
+|---|---|
+| ran all 500 steps having moved **< 0.01 m** | **28 (22.4%)** |
+| successes among them | **0** |
+| zero path but stopped early (instant commit on an inherited node) | 13 (10.4%) |
+| median final distance to goal, stationary subtasks | 3.63 m |
+
+The decisive clue was the distribution over subtask index: **1, 2, 3, 4, 5, 6,
+7 -- and never 0.** Subtask 0 starts with empty memory, so there is no
+remembered node to get stuck on; every later subtask inherits one.
+
+**Cause.** When `plan_astar` cannot reach the matched node,
+`_act_approaching` gave up after `APPROACH_GIVEUP_TURNS` and did:
+
+```python
+self.state = AgentState.SEARCHING
+self._matched_node = None
+```
+
+It cleared the node but never *rejected* it. `GoalMatcher` therefore returned
+the same node on the very next tick, APPROACHING failed to plan four more
+times, and the cycle repeated until the 500-step budget ran out -- turning in
+place the whole way, which is why `actual_path_length` is 0.00 m.
+
+**Reproduced in closed loop** before changing anything, driving the real
+`GoatAgent` against the real motion model (0.25 m step, 30 deg turns) with a
+walled-off room the planner cannot enter:
+
+| | before | after |
+|---|---|---|
+| ticks used | 500 | **15** |
+| turn actions | 499 | 14 |
+| ticks in APPROACHING | 375 | 3 |
+| distance moved | 0.000 m | 0.000 m |
+| node rejected | no | **yes** |
+
+**Fix.** Route that give-up through `_reject_matched_node()`, which is what the
+verification path already does (6.37), and hand control to `_act_searching`
+immediately. The node is excluded for the rest of the subtask, so the matcher
+falls through to the next candidate -- or returns None, which keeps the agent
+exploring. The budget freed is the whole point: 485 steps per affected subtask
+that were previously spent turning on the spot.
+
+**A hypothesis that was wrong, recorded because it cost time.** The first guess
+was a SEARCHING livelock: a frontier so close that `_follow_path` finds the
+final waypoint already within `FINAL_ARRIVE_CELLS`, returns None, retires the
+frontier and turns, with `_no_plan_count` reset by the successful plan so
+nothing counts toward give-up. A naive harness appeared to confirm it -- until
+it became clear the harness never updated the compass, so of course the agent
+turned forever. With a real motion model the same scenes terminate normally
+(16-122 ticks, 0.25-2.10 m moved). The lesson is the same one as 6.33: an open
+loop will confirm almost any theory about a controller.

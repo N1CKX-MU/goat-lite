@@ -233,12 +233,21 @@ class GoatAgent:
             if self._current_path is None:
                 self._no_plan_count += 1
                 if self._no_plan_count >= APPROACH_GIVEUP_TURNS:
-                    # Can't reach the matched node — go explore for a better
-                    # vantage instead of stopping (which would count as failure).
-                    self.state = AgentState.SEARCHING
-                    self._matched_node = None
-                    self._current_path = None
-                    self._no_plan_count = 0
+                    # Can't reach the matched node. REJECT it rather than just
+                    # clearing it: clearing alone was a livelock, because the
+                    # matcher hands the same node straight back on the next
+                    # tick, APPROACHING fails to plan four more times, and the
+                    # cycle repeats for the whole step budget.
+                    #
+                    # Measured on the dev eval: 28 of 125 subtasks (22.4%)
+                    # burned all 500 steps having travelled < 0.01 m, with zero
+                    # successes among them -- and none at subtask index 0,
+                    # because an empty memory has no node to get stuck on. A
+                    # closed-loop reproduction with an unreachable node gives
+                    # 499 turns, 0.000 m moved, APPROACHING 375 ticks and
+                    # SEARCHING 124.
+                    self._reject_matched_node()
+                    return self._act_searching(obs)
                 return 2  # turn to try to find a way
             else:
                 self._no_plan_count = 0

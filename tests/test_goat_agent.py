@@ -7,7 +7,9 @@ import math
 import numpy as np
 import pytest
 
-from src.agent.goat_agent import GoatAgent, AgentState
+from src.agent.goat_agent import (
+    GoatAgent, AgentState, APPROACH_GIVEUP_TURNS,
+)
 from src.sim.env import Observation, GoalSpec
 from src.perception.pipeline import PerceivedInstance
 from src.memory.instance_db import InstanceNode
@@ -425,3 +427,57 @@ class TestMemoryLifecycle:
         agent = _make_agent(memory=Bare())
         agent.reset(_make_obs(), keep_memory=False)
         assert agent.state == AgentState.SEARCHING
+
+
+class TestUnreachableGoal:
+    """An unreachable matched node used to burn the entire step budget.
+
+    Measured on the dev eval: 28 of 125 subtasks (22.4%) ran all 500 steps
+    having moved less than 0.01 m, zero of them successful -- and none at
+    subtask index 0, because an empty memory has no node to get stuck on. The
+    approach give-up cleared `_matched_node` without rejecting it, so the
+    matcher returned the same node on the next tick and the agent cycled
+    APPROACHING -> four failed plans -> SEARCHING -> re-match, turning in place
+    until the subtask timed out.
+    """
+
+    def _sealed_room_map(self):
+        """Free floor with a walled-off room the agent cannot plan into."""
+        class Walled(FakeMap):
+            def __init__(self):
+                super().__init__(grid_size=120)
+                self._occ[40:60, 40:60] = 1      # wall
+                self._occ[43:57, 43:57] = 0      # interior, but no door
+                self._resolution = 0.05
+
+            def world_to_grid(self, xy):
+                return (int(round(xy[1] / 0.05)), int(round(xy[0] / 0.05)))
+
+        return Walled()
+
+    def _agent_facing_a_sealed_goal(self):
+        node = _make_node(node_id=1, world_xyz=(2.5, 0.5, 2.5))  # room centre
+        matcher = FakeMatcher(result=(node, 0.9))
+        agent = _make_agent(matcher=matcher,
+                            semantic_map=self._sealed_room_map())
+        agent.reset(_make_obs(gps=(4.0, 4.0)))
+        return agent, matcher, node
+
+    def test_rejects_a_node_it_cannot_reach(self):
+        agent, matcher, node = self._agent_facing_a_sealed_goal()
+        for _ in range(40):
+            agent.act(_make_obs(gps=(4.0, 4.0)))
+        assert node.node_id in matcher.last_exclude, \
+            "an unreachable node must be rejected, not re-offered forever"
+
+    def test_does_not_burn_the_budget_on_an_unreachable_node(self):
+        agent, matcher, node = self._agent_facing_a_sealed_goal()
+        # Once rejected and with nothing else in memory, the agent must stop
+        # re-entering APPROACHING for the same node.
+        approaching = 0
+        for _ in range(60):
+            agent.act(_make_obs(gps=(4.0, 4.0)))
+            if agent.state == AgentState.APPROACHING:
+                approaching += 1
+        assert approaching <= APPROACH_GIVEUP_TURNS + 2, (
+            f"spent {approaching} ticks approaching an unreachable node")
