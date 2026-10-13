@@ -50,7 +50,7 @@ of what fails** at a reduced operating point. Three results so far:
 
 ```bash
 conda activate goat            # python 3.9, headless habitat-sim
-pytest tests/ -q               # 244 tests, ~25 s, no GPU or scene files needed
+pytest tests/ -q               # 268 tests, ~30 s; 254 need no GPU at all
 python scripts/smoke_test.py   # loads a scene + YOLO + CLIP and steps 100 times
 ```
 
@@ -133,8 +133,11 @@ it. Violating one produces a silently wrong agent, not a crash.
 
 ## Testing
 
-244 tests, about 25 seconds, no GPU, no model downloads, no scene files —
-dependency-injected fakes throughout. The suite pins conventions, which cuts
+268 tests, about 30 seconds. 254 of them need no GPU, no model downloads and no
+scene files — dependency-injected fakes throughout. The other 14 load real YOLO
+and CLIP weights, so run them on a free card: against a GPU already busy with an
+eval they fail with out-of-memory errors that look exactly like regressions
+(§6.53), and `--ignore=tests/test_agent_smoke.py` is the right scope mid-run. The suite pins conventions, which cuts
 both ways: three transform tests once asserted the *wrong* camera convention and
 encoded a serious geometric bug for weeks. A green suite confirms only the
 conventions the tests were written against.

@@ -3130,3 +3130,66 @@ next measurement that matters is the **in-radius detector ceiling** (6.35, 6.32)
 how many of the 218 subtasks are winnable at all by any navigator carrying this
 detector. Until that number exists, agent changes are guesses about headroom
 that may not be there.
+
+#### 6.52 Three of Week 10's ablations could not be selected at all
+
+2026-10-13. PLAN.md 7.10 lists seven ablation axes. Four were reachable as
+flags; **three were not reachable at any price**: the planner and the frontier
+scoring rule were hard-coded inside `GoatAgent`, and the encoder was only
+reachable by editing `ClipEncoder`'s defaults. Nothing failed -- the sweep would
+simply have reported a complete-looking table that silently omitted them, which
+is 6.46 and 6.49's failure mode applied to the experiment design rather than to
+a feature.
+
+Three findings came out of wiring them, in increasing order of importance.
+
+**`MobileCLIP-S0` does not exist in open_clip 3.3.0.** 7.10 names it for the
+encoder ablation. `open_clip.list_models()` offers `MobileCLIP-S1`, `-S2`, `-B`
+and `MobileCLIP2-S0`; there is no plain `-S0`. That arm could never have run,
+and would have failed *per arm, after loading a scene and a detector*, with
+open_clip's own error. `validate_encoder()` now checks the
+(architecture, weights) pairing against `list_pretrained()` before anything
+expensive loads and names the near misses. The grid uses
+`MobileCLIP2-S0/dfndr2b` as the nearest equivalent.
+
+**`plan_fmm` returns None when skfmm is missing**, which the agent cannot
+distinguish from "no path exists". An FMM arm on a machine without skfmm would
+end every subtask in `no_plan` and read as a *planner result* -- a dramatic,
+entirely false one. `resolve_planner("fmm")` now raises at build time instead.
+skfmm 2025.01.29 is installed here, so the arm is genuinely runnable; the guard
+is for the Kaggle machine, where it is one `pip install` away from silently
+fabricating a finding. (`requirements.txt` already carries a comment warning of
+exactly this, which is how it was spotted.)
+
+**An unseeded random control is not an experiment.** The `random` frontier rule
+is the useful arm -- if it ties the scored rules, frontier choice is not what
+limits the agent -- but only if it can be re-run. It takes a seeded Generator.
+
+A test asserts that the visited-frontier blacklist is honoured under *every*
+strategy, because that retirement is what stops the agent oscillating between
+two frontiers for a whole budget, and it would be easy to drop while adding a
+branch.
+
+#### 6.53 Concurrency on this card is capped by throughput, not VRAM
+
+2026-10-13. Established earlier that 1.9 GB per eval process against 6 GB
+allowed three concurrent runs. Measured with three actually running:
+
+| concurrent eval processes | s per episode, each | aggregate episodes/s |
+|---|---|---|
+| 2 (run #3) | 114 | 0.0175 |
+| 3 (sweep) | ~175 | 0.0171 |
+
+**Adding the third process bought nothing.** Per-process time rose by the same
+factor the count did, so aggregate throughput is flat -- within noise, slightly
+worse. VRAM was the wrong constraint to plan against: at three processes the
+card sat at 4.9 of 6 GB but only 52% utilisation, and the limit is compute and
+IO contention. Two is the useful degree of parallelism here, and a nine-arm
+sweep is about two hours whatever the arrangement.
+
+Two practical consequences. Scheduling more processes because memory fits is
+not a speedup, and **running the GPU test suite during an eval is actively
+harmful**: `tests/test_agent_smoke.py` loads real YOLO and CLIP weights, and
+doing so against a card at 4.9 GB produced eight CUDA out-of-memory failures
+that look exactly like regressions. Scope to `--ignore=tests/test_agent_smoke.py`
+while an eval is running; the other 254 tests need no GPU at all.

@@ -888,6 +888,21 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 > The in-radius detector ceiling (`scripts/detector_ceiling.py`) is measured
 > alongside as a cheap Week 9 diagnostic. It bounds what any arm could score,
 > but it does not gate the sweep.
+>
+> **All seven axes are now selectable** (6.52). The planner, the frontier rule
+> and the encoder were hard-coded and could not have been swept at all; they are
+> flags as of this week, with three new grids (`planner`, `frontier`,
+> `encoder`). Two corrections to this section's own list came out of that:
+>
+> - **`MobileCLIP-S0` does not exist in open_clip 3.3.0.** The nearest
+>   equivalents are `MobileCLIP2-S0` and `MobileCLIP-S1`; the grid uses
+>   `MobileCLIP2-S0/dfndr2b`.
+> - **This section budgets "~6 configs" but lists about 24.** language (3),
+>   merge distance (3) x embed similarity (3), encoder (2), success distance
+>   (3), planner (2), frontier (3), memory (2). At ~2 h per three arms on this
+>   card, the full list is roughly a day and a half of GPU. Running it in
+>   priority order, matcher axes first, keeps the section's intent inside its
+>   stated budget.
 
 **Prereqs:** Week 9 baseline established.
 
