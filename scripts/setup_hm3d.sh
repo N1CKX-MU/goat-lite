@@ -150,13 +150,36 @@ if [[ "$MODE" == "verify" ]]; then
 fi
 
 # ── download ──
+# A private file is the safest route: the values never appear in a command, in
+# `ps`, or in shell history. Anything world- or group-readable is refused.
+CRED_FILE="${HM3D_CRED_FILE:-$HOME/.hm3d_env}"
+if [[ -z "${HM3D_USERNAME:-}" || -z "${HM3D_PASSWORD:-}" ]] && [[ -f "$CRED_FILE" ]]; then
+    perms=$(stat -c '%a' "$CRED_FILE")
+    if [[ "$perms" != "600" && "$perms" != "400" ]]; then
+        bad "$CRED_FILE is mode $perms; refusing to read a credential file"
+        echo "        others can read it. fix with: chmod 600 $CRED_FILE"
+        exit 2
+    fi
+    # shellcheck disable=SC1090
+    source "$CRED_FILE"
+    ok "credentials loaded from $CRED_FILE (values not shown)"
+fi
+
 if [[ -z "${HM3D_USERNAME:-}" || -z "${HM3D_PASSWORD:-}" ]]; then
-    bad "HM3D_USERNAME / HM3D_PASSWORD are not set in the environment"
-    echo "        export them first so the token stays out of shell history"
-    echo "        and out of this script's arguments:"
+    bad "HM3D_USERNAME / HM3D_PASSWORD are not set"
+    echo "        Preferred: put them in a private file, so the secret never"
+    echo "        reaches a command line, ps, or your shell history:"
     echo
-    echo "          read -rs -p 'hm3d user: ' HM3D_USERNAME; export HM3D_USERNAME"
-    echo "          read -rs -p 'hm3d pass: ' HM3D_PASSWORD; export HM3D_PASSWORD"
+    echo "          umask 077 && cat > ~/.hm3d_env    # then type the two lines"
+    echo "          export HM3D_USERNAME=<token id>"
+    echo "          export HM3D_PASSWORD=<token secret>"
+    echo "          ^D"
+    echo "          chmod 600 ~/.hm3d_env"
+    echo
+    echo "        Then re-run this script; it reads that file automatically."
+    echo "        NOTE: a value typed into read's -p PROMPT is not input -- it"
+    echo "        is printed. Type it at the prompt instead."
+    echo
     exit 2
 fi
 
