@@ -3286,3 +3286,79 @@ subtask.
 Two consequences. The merge radius is not worth sweeping again -- it has no
 measurable lever arm -- and if instance fragmentation is ever suspected as a
 failure cause, the thing to loosen is `merge_embed_sim`, not `merge_dist_m`.
+
+#### 6.56 A 401 body written into the target file shifted a 27 GB archive by 56 bytes
+
+*2026-10-14.* The HM3D train scenes finished downloading at 27846 MB. Two
+checks disagreed about whether it was usable, and the disagreement is the
+finding.
+
+**My own completeness check was wrong first.** It tested the end-of-archive
+marker with `tail -c 1024 file | od -An -tx1 | tr -d ' \n' | grep -qE '^0*$'`
+and reported the archive truncated. GNU `od` **collapses runs of identical
+output lines into a single `*`**, so 1024 zero bytes render as one zero line
+plus `*`, and the regex rejected it. `tail -c 1024 file | tr -d '\000' | wc -c`
+returns 0 — the trailer was there all along. Third instance of a tool's
+convenience formatting changing the thing being measured (6.46, and the
+`pgrep -f` watcher that matched itself).
+
+The archive was damaged, though, in a way that neither check describes. `tar
+-tf` listed 2399 members and then failed with "This does not look like a tar
+archive"; Python's `tarfile`, which does not resynchronise, failed on the
+**first** header with `bad checksum`. The first 56 bytes of the file are:
+
+```
+{"code":"request.unauthorized","message":"Unauthorized"}
+```
+
+A 401 from the CDN arrived as a JSON body, and curl wrote that body into the
+target `.tar`. The next attempt's `-C -` then computed its resume offset from
+what was on disk — 56 bytes — and asked the server for byte 56 onward. So the
+file is the error message followed by `real_archive[56:]`: **every byte after
+the first 56 is correctly placed, and the first 56 are gone.** This is 6.19's
+mechanism inverted. There, a retry restarted at byte 0 and discarded 13 GB of
+good data; here a retry resumed past garbage and kept it.
+
+What makes it dangerous is how well it imitates success. The file is the right
+size, it has a valid end-of-archive trailer, `tar` recovers by resynchronising
+and lists 2399 of 2400 members, and GNU `tar -xf` would extract all 1600 files
+and exit nonzero at the end with a message about one bad header. The damage is
+confined to the first member's name field, because a tar header is 512 bytes
+and the clobbered span is only the first 56 of them.
+
+The name was recoverable, and recovering it *proves* the rest of the block is
+intact. A tar header's checksum covers its own 512 bytes with the checksum
+field blanked. Writing the only candidate the listing allows,
+`00000-kfPV7w3FaU5/`, into bytes 0-99 makes the computed checksum equal the
+stored `012201` exactly. Reconstructing those 56 bytes on the fly, without
+modifying the file:
+
+```bash
+{ python -c "import sys;sys.stdout.buffer.write(b'00000-kfPV7w3FaU5/'+b'\0'*38)"
+  tail -c +57 data/hm3d-train-habitat.tar
+} | tar -tf -
+```
+
+gives `exit 0`, **2400 members, 800 `.basis.glb`, 800 `.basis.navmesh`, 800
+directory entries, empty stderr**. The download is complete; only one directory
+entry's header was ever damaged, and a directory entry carries no payload.
+
+Two guards are now in `scripts/setup_hm3d.sh`, because the semantics and
+configs tars are downloaded the same way:
+
+- `quarantine_bad_partials` runs **before every attempt, including the first**,
+  and moves any `*.tar` without `ustar` at byte 257 to `<name>.rejected`. An
+  error body is far too short to have a byte 257, so this catches the poison
+  while it is still 56 bytes, and the retry then starts from byte 0. It moves
+  rather than deletes: the bytes are the evidence.
+- `first_header_intact` validates the first header's checksum after the
+  downloads, which is the check that catches an archive already resumed past an
+  error body — the state this one was in.
+
+Both were tested against the real damaged file and against a synthetic 56-byte
+error body.
+
+The reason the first request was unauthorized is not recorded; the downloader's
+log predates this session's context. It matters only that an HTTP error body is
+a plausible thing to find at the head of any resumable download, and that
+`-C -` will happily build on it.

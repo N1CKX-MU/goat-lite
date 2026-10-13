@@ -74,6 +74,55 @@ ok()   { printf '  ok    %s\n' "$*"; }
 bad()  { printf '  FAIL  %s\n' "$*"; }
 warn() { printf '  warn  %s\n' "$*"; }
 
+# ── poisoned-partial guard (engineering log 6.56) ──
+# A 401 from the CDN arrives as a JSON body, and curl writes that body into the
+# target .tar. The next attempt's `-C -` then resumes from the end of the error
+# message, so the archive lands offset by its length -- 56 bytes, in the case
+# that cost one 27 GB download. The file ends up the right size, with a valid
+# end-of-archive trailer, and only the first member's header destroyed, so
+# nothing notices until something tries to read it.
+#
+# Cheap test: a real tar has "ustar" at byte 257 of its first header. An error
+# body is far too short to have a byte 257 at all.
+looks_like_a_tar() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0                      # nothing there is fine
+    (( $(stat -c %s "$f") >= 512 )) || return 1
+    [[ "$(dd if="$f" bs=1 skip=257 count=5 2>/dev/null)" == "ustar" ]]
+}
+
+# Quarantine rather than delete: the bytes are evidence, and a resume that
+# starts from a file this script moved aside is the behaviour we want.
+quarantine_bad_partials() {
+    local f
+    while IFS= read -r f; do
+        if ! looks_like_a_tar "$f"; then
+            mv -- "$f" "$f.rejected"
+            warn "$(basename "$f") is not an archive; it starts with:"
+            printf '          %s\n' "$(head -c 120 "$f.rejected" | tr -d '\000' | tr -d '\n')"
+            echo "        moved to $(basename "$f").rejected, so the retry starts at"
+            echo "        byte 0 instead of resuming past the error message (6.56)."
+        fi
+    done < <(find "$DATA_PATH" -maxdepth 4 -name '*.tar' 2>/dev/null)
+}
+
+# Stronger check, for a tar that is already complete: the first header's
+# checksum covers its own 512 bytes, so a clobbered name field fails it. This
+# is what catches an archive that was already resumed past an error body.
+first_header_intact() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0
+    "$PY" -I -c '
+import sys
+b = open(sys.argv[1], "rb").read(512)
+if len(b) < 512:
+    sys.exit(1)
+stored = b[148:156].strip(b"\0 ")
+t = bytearray(b); t[148:156] = b"        "
+sys.exit(0 if stored and int(stored, 8) == sum(t) else 1)
+' "$f" 2>/dev/null
+}
+
 cd "$REPO_ROOT" || exit 1
 
 if [[ "$MODE" == "list" ]]; then
@@ -191,6 +240,9 @@ for uid in "${UIDS[@]}"; do
     say "$uid"
     attempt=1
     while (( attempt <= RETRIES )); do
+        # Before every attempt, including the first: a previous run may have
+        # left an error body where the archive goes (6.56).
+        quarantine_bad_partials
         # One uid per invocation, so a failure costs one tar and not the set.
         # Retrying the WHOLE invocation is deliberate: 6.19 records curl's
         # -C - computing its resume offset once, so a retry firing mid-transfer
@@ -212,6 +264,24 @@ for uid in "${UIDS[@]}"; do
         exit 1
     fi
 done
+
+# Any archive still on disk must have an intact first header; a prefix-shifted
+# one reads as complete until something opens it (6.56).
+say "archive headers"
+shopt -s nullglob
+for t in "$DATA_PATH"/*.tar "$DATA_PATH"/*/*.tar; do
+    if first_header_intact "$t"; then
+        ok "$(basename "$t") first header checksums"
+    else
+        bad "$(basename "$t") has a damaged first header -- it was resumed past"
+        echo "        an error body (6.56). The payload is probably fine; the"
+        echo "        first member's name field is what is destroyed. Check with:"
+        echo "          tar -tf $t | wc -l"
+        echo "        and repair the stream without rewriting the file:"
+        echo "          { printf '<first member name>' ; tail -c +<N+1> $t ; } | tar -xf -"
+    fi
+done
+shopt -u nullglob
 
 if verify; then
     say "next"

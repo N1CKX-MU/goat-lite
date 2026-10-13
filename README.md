@@ -29,7 +29,7 @@ of what fails** at a reduced operating point. Three results so far:
   no pitch action, 14.2% of subtasks have a goal that cannot be framed from
   anywhere a scoring stop could happen — every `rug` subtask among them. §6.35,
   §6.42.
-- **A per-component failure taxonomy**, with 55 dated findings in
+- **A per-component failure taxonomy**, with 56 dated findings in
   `TECHNICAL_GUIDE.md` §6, each paired with the measurement that produced it,
   **including the hypotheses that turned out to be wrong**.
 
