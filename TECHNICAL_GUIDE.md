@@ -2867,3 +2867,42 @@ persist across the subtasks of an episode, so replaying an episode from subtask
 point of the experiment -- is exactly the quantity that would be corrupted. A
 partially complete scene therefore has its rows discarded and the scene is
 redone whole.
+
+#### 6.46 Resume silently skipped scenes that shared episode ids
+
+The first `--resume` (6.45) decided what was already done with a *set* of
+`(episode_id, subtask_index)` pairs. **GOAT-Bench numbers episodes per scene,
+not globally.** Over the 30-episode dev subset, 218 subtasks share only **86
+distinct** such pairs, and episode id `9` appears in **five** different scenes:
+
+```
+id 0: 00871, 00876, 00831
+id 3: 00869, 00878, 00847, 00802, 00808
+id 9: 00877, 00853, 00871, 00813, 00808
+```
+
+So a scene could be declared "already done" because an **earlier, unrelated
+scene** had produced the same ids. It happened on the first real resume: the
+log reported `[6/22] Skipping (already done)` while `results.csv` held exactly
+67 rows -- which is scenes 1-5 (13+9+17+12+16) and nothing of scene 6. Five
+subtasks dropped, and the loss grows as the covered set grows, because more
+scenes become subsets of it.
+
+Caught by arithmetic, not by a crash. That is the point worth keeping: an eval
+harness that silently returns *fewer rows than it should* is the worst failure
+mode available to it, because every downstream number stays plausible. SR is
+computed over whatever arrived.
+
+`resumable_prefix()` matches **positionally** instead. The sequence is
+deterministic -- fixed seed, fixed scene order, and `save_results()` only runs
+after a scene completes -- so the n-th row of `results.csv` always belongs to
+the same subtask. The prefix is verified scene by scene and resume stops at the
+first mismatch, so a short, reordered or foreign file causes a redo rather than
+a skip. `tests/test_eval.py` pins the exact failure: two different scenes that
+both call their episode `9` with 5 subtasks, one scene's rows on disk, and the
+assertion that exactly **one** scene is resumable.
+
+A related habit worth recording, from the same hour: `pkill -f run_dev_eval.py`
+killed the shell that ran it. `pkill -f` matches against full command lines, and
+the pattern appears in the command line of the very shell issuing it. Use
+`pgrep -x python` (exact process name) or kill by collected PID.
