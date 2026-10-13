@@ -3193,3 +3193,96 @@ harmful**: `tests/test_agent_smoke.py` loads real YOLO and CLIP weights, and
 doing so against a card at 4.9 GB produced eight CUDA out-of-memory failures
 that look exactly like regressions. Scope to `--ignore=tests/test_agent_smoke.py`
 while an eval is running; the other 254 tests need no GPU at all.
+
+#### 6.54 The 10-episode sweep cannot resolve any axis it was built to test
+
+*2026-10-14.* PLAN.md Section 7.10's grid, run over three axes at
+`--n-episodes 10` (80 subtasks per arm, nine arms, about two hours wall time
+with two concurrent processes):
+
+| axis | arm | SR | SPL | matched | median final dist |
+|---|---|---|---|---|---|
+| `--language-threshold` | 0.20 | 3.8% (3/80) | 0.036 | 52.5% | 4.44 m |
+| | **0.24** | **6.2% (5/80)** | 0.056 | 46.2% | 5.00 m |
+| | 0.28 | 1.2% (1/80) | 0.013 | 31.2% | 4.11 m |
+| `--merge-dist` | 0.50 | 5.0% (4/80) | 0.044 | 46.2% | 5.00 m |
+| | **0.75** | **6.2% (5/80)** | 0.056 | 46.2% | 5.00 m |
+| | 1.00 | 6.2% (5/80) | 0.056 | 46.2% | 5.00 m |
+| `--success-distance` | 0.75 | 2.5% (2/80) | 0.019 | 45.0% | 4.36 m |
+| | **1.00** | **6.2% (5/80)** | 0.056 | 46.2% | 5.00 m |
+| | 1.50 | 0.0% (0/80) | 0.000 | 43.8% | 4.74 m |
+
+The bolded arms are the configuration already in the code. **The sweep selects
+the running defaults in all three grids, and that is the whole of what it
+establishes.** Every arm is paired positionally against the others over the
+same 80 subtasks, in the same order, with `(episode_id, subtask_index,
+category, modality)` checked identical row by row. An exact two-sided sign test
+over the paired disagreements:
+
+| pair | wins | losses | p |
+|---|---|---|---|
+| lang024 vs lang028 | 4 | 0 | 0.125 |
+| sd100 vs sd150 | 5 | 0 | 0.062 |
+| sd075 vs sd100 | 0 | 3 | 0.250 |
+| merge050 vs merge075 | 0 | 1 | 1.000 |
+| merge075 vs merge100 | 0 | 0 | 1.000 |
+
+Nothing reaches p < 0.05, and nothing can: at n = 80 one subtask is 1.25 pp,
+and a two-sided sign test needs **six one-way flips** before p < 0.05. The
+largest disagreement anywhere in the grid is five. The arms differ by one to
+five subtasks out of eighty, which at this success rate is the resolution floor
+of the instrument, not a measurement of the parameter.
+
+Two mechanisms make it worse than the arithmetic suggests, and both are visible
+in the rows:
+
+**Axes leak across modalities through the persistent memory.** Raising the
+language threshold from 0.20 to 0.24 flipped two *category* subtasks, which
+that parameter cannot touch directly. Episode 1 subtasks 3 and 5 are language
+goals that matched at 0.20 and stopped matching at 0.24; the agent therefore
+spent those two subtasks exploring instead of approaching, and arrived at
+subtask 7 -- a category goal -- with a different map and a different instance
+database. Subtask 7 then succeeded. The lifelong property under test is also a
+confound in every sweep: an arm is not a per-subtask intervention, it is a
+different trajectory through the whole episode.
+
+**A flip can be a visibility coin-toss at the final pose.** Episode 8 subtask 2
+stopped 0.63 m from the goal and was scored a failure at 0.20, and 0.68 m from
+it and scored a success at 0.24. The nearer stop lost. Success needs the
+benchmark's geometric visibility test as well as the radius, and inside 1 m
+with a 1.41 m camera and no pitch action that test is close to a coin toss
+(6.35, 6.42) -- so a few centimetres of final pose, which any parameter change
+perturbs, moves the score.
+
+Note also that one of the five successes in the winning arm is accidental:
+episode 1 subtask 7 succeeded with `node_error_m` of 3.83, meaning the agent was
+approaching a memory node 3.83 m from any true instance and happened to stop
+within 1 m of one with it in frame.
+
+The useful conclusion is about the instrument, not the hyperparameters. **With
+SR near 5%, a 10-episode arm cannot rank configurations**, and the ~24-arm grid
+Section 7.10 lists would cost about a day and a half of GPU to produce the same
+non-answer. Ranking at this operating point needs either the full 218-subtask
+subset per arm (about an hour each, so a three-arm axis is an afternoon) or a
+metric with more resolution than success -- `ever_matched` (46-52% here) and
+`node_error_m` respond to the matcher axes with ten times the sample size,
+because every subtask contributes. Section 7.10's gate is recorded as not
+resolvable at the configured sweep size rather than as a result.
+
+#### 6.55 Merge distance above 0.75 m is inert: the two arms are bit-identical
+
+*2026-10-14.* `--merge-dist 0.75` and `--merge-dist 1.00` did not differ in one
+field of one row across 80 subtasks -- same successes, same step counts, same
+final distances, same `node_error_m`, same explored area. Not "within noise":
+`diff` of the two `results.csv` files is empty.
+
+So in 80 subtasks of real scenes, **no two same-class detections ever landed
+between 0.75 m and 1.00 m apart** while also clearing the 0.85 CLIP similarity
+gate. The distance test is not what decides a merge at this operating point;
+the class and embedding gates bind first, and back-projected centres of the same
+instance cluster well inside 0.75 m. Dropping to 0.50 m changed exactly one
+subtask.
+
+Two consequences. The merge radius is not worth sweeping again -- it has no
+measurable lever arm -- and if instance fragmentation is ever suspected as a
+failure cause, the thing to loosen is `merge_embed_sim`, not `merge_dist_m`.

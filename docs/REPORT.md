@@ -926,6 +926,60 @@ false positive that is *stable across frames* clears the gate as easily as a tru
 one. Memory still has no mechanism for disbelief, unlike the occupancy grid,
 which accumulates clamped evidence in both directions.
 
+#### Hyperparameter sensitivity, and what a 10-episode arm can resolve
+
+Three axes were swept over nine arms of 80 subtasks each (10 episodes of the
+development subset), paired positionally so that every arm is read over the same
+subtasks in the same order.
+
+| axis | 0.20 / 0.50 / 0.75 | middle | 0.28 / 1.00 / 1.50 |
+|---|---|---|---|
+| language threshold | 3.8% | **6.2%** (0.24) | 1.2% |
+| merge distance (m) | 5.0% | **6.2%** (0.75) | 6.2% |
+| success distance (m) | 2.5% | **6.2%** (1.00) | 0.0% |
+
+Every grid selected the configuration the system already ran, so the sweep
+confirms the operating point and changes nothing in it.
+
+It does not, however, rank the arms. The arms differ by one to five subtasks out
+of eighty; an exact two-sided sign test over the paired disagreements returns
+p >= 0.062 for every pair in the grid, and at this sample size six one-way flips
+are needed before p < 0.05. The honest result is a statement about the
+instrument: **at a success rate near 5%, a 10-episode arm is below the
+resolution needed to compare configurations**, and the remaining axes were not
+run for that reason rather than for lack of time.
+
+Three observations from the paired rows are more informative than the table:
+
+1. **The axes are not independent of the modality they name.** Raising the
+   language threshold flipped two *category* subtasks, which it cannot affect
+   directly. In episode 1, two language subtasks stopped matching at the higher
+   threshold; the agent explored instead of approaching, and reached a later
+   category subtask with a different map and a different instance database,
+   which it then solved. Because memory persists across subtasks by design, an
+   arm is not a per-subtask intervention but a different trajectory through the
+   whole episode — the lifelong property under study is also a confound in every
+   ablation of it.
+
+2. **Scoring at the margin is close to a coin toss.** One subtask stopped 0.63 m
+   from its goal and was scored a failure, and 0.68 m from it and was scored a
+   success: the nearer stop lost, because success also requires the benchmark's
+   geometric visibility test, which inside 1 m with a 1.41 m fixed-pitch camera
+   fails more often than it passes (§4.5.2). A few centimetres of final pose,
+   which any parameter change perturbs, moves the score.
+
+3. **One axis has no effect whatsoever.** Merge distances of 0.75 m and 1.00 m
+   produced byte-identical results over all 80 subtasks — the same successes,
+   step counts, final distances and explored areas. No two same-class detections
+   ever fell between those radii while also clearing the embedding-similarity
+   gate, so the distance test is not what decides a merge at this operating
+   point.
+
+The sweep therefore reinforces §4.5: the parameters all act on stages the median
+subtask never reaches. The way to make an arm distinguishable is to raise the
+success rate — which means the detector — not to search the configuration space
+more finely.
+
 ### 4.7 Known Limitations
 
 The first three limitations of the previous revision — no orientation on

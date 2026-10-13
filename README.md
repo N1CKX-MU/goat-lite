@@ -29,7 +29,7 @@ of what fails** at a reduced operating point. Three results so far:
   no pitch action, 14.2% of subtasks have a goal that cannot be framed from
   anywhere a scoring stop could happen — every `rug` subtask among them. §6.35,
   §6.42.
-- **A per-component failure taxonomy**, with 47 dated findings in
+- **A per-component failure taxonomy**, with 55 dated findings in
   `TECHNICAL_GUIDE.md` §6, each paired with the measurement that produced it,
   **including the hypotheses that turned out to be wrong**.
 
@@ -50,7 +50,7 @@ of what fails** at a reduced operating point. Three results so far:
 
 ```bash
 conda activate goat            # python 3.9, headless habitat-sim
-pytest tests/ -q               # 268 tests, ~30 s; 254 need no GPU at all
+pytest tests/ -q               # 282 tests, ~30 s; 268 need no GPU at all
 python scripts/smoke_test.py   # loads a scene + YOLO + CLIP and steps 100 times
 ```
 
@@ -133,7 +133,7 @@ it. Violating one produces a silently wrong agent, not a crash.
 
 ## Testing
 
-268 tests, about 30 seconds. 254 of them need no GPU, no model downloads and no
+282 tests, about 30 seconds. 268 of them need no GPU, no model downloads and no
 scene files — dependency-injected fakes throughout. The other 14 load real YOLO
 and CLIP weights, so run them on a free card: against a GPU already busy with an
 eval they fail with out-of-memory errors that look exactly like regressions

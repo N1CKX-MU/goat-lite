@@ -857,14 +857,19 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 
 ### 7.10 Week 10 — Hyperparameter sweep + ablation setup
 
-> **STATUS (2026-10-13).** The ablation infrastructure is built and has been run
-> twice; the done criteria below are **1 of 3 met**.
+> **STATUS (2026-10-14).** The ablation infrastructure is built, the memory
+> ablation has been run twice and three of the grids are now run; the done
+> criteria below are **2 of 3 met**.
 >
 > - [x] Memory-on vs memory-off run on identical episodes, paired by position,
 >       `scripts/sweep.py` and every knob exposed as a flag.
-> - [ ] All planned ablations run — the five grids have not been run, and are
->       deliberately deferred; see below.
-> - [ ] Best config identified and written into `configs/agent_default.yaml`.
+> - [ ] All planned ablations run — three of roughly eight grids are run
+>       (language threshold, merge distance, success distance). The rest are
+>       deferred on measured grounds rather than for time: see the 2026-10-14
+>       update below.
+> - [x] Best config identified — every grid selected the values already in the
+>       code, so `configs/agent_default.yaml` needs no change. Identified, not
+>       improved.
 > - [ ] **Memory on-vs-off delta > 0 — NOT MET.** It is exactly **0.0 pp**
 >       (7/218 against 7/218). This section says "if not, memory is broken — go
 >       back". The more defensible reading, from 6.50, is that the delta is
@@ -903,6 +908,46 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 >   card, the full list is roughly a day and a half of GPU. Running it in
 >   priority order, matcher axes first, keeps the section's intent inside its
 >   stated budget.
+
+> **UPDATE (2026-10-14) — three grids run, and the sweep is under-powered.**
+> Nine arms at `--n-episodes 10` (80 subtasks each, ~2 h with two concurrent
+> processes): language threshold, merge distance and success distance.
+>
+> | axis | arms | best | SR of best |
+> |---|---|---|---|
+> | `--language-threshold` | 0.20 / **0.24** / 0.28 | 0.24 | 6.2% (5/80) |
+> | `--merge-dist` | 0.50 / **0.75** / 1.00 | 0.75 | 6.2% (5/80) |
+> | `--success-distance` | 0.75 / **1.00** / 1.50 | 1.00 | 6.2% (5/80) |
+>
+> **Every grid selected the configuration already in the code**, so nothing is
+> written into `configs/agent_default.yaml` — the third done criterion is met in
+> the sense that the best config is identified and already set, not in the sense
+> that the sweep moved anything.
+>
+> It also cannot be read as a ranking. Arms differ by one to five subtasks out
+> of eighty; an exact sign test over the paired disagreements gives p >= 0.062
+> everywhere, and at n = 80 a two-sided sign test needs six one-way flips before
+> p < 0.05. The caveat stated above was correct and is now measured: this grid
+> size is below the resolution of the instrument (6.54). Two specifics worth
+> carrying forward:
+>
+> - **The axes are not independent of the modality they name.** Raising the
+>   language threshold flipped two *category* subtasks, through the persistent
+>   memory: a language subtask that stops matching changes the trajectory, the
+>   map and the instance database that a later category subtask inherits. The
+>   lifelong property under test is a confound in every arm.
+> - **`--merge-dist 0.75` and `1.00` are bit-identical** across all 80 subtasks
+>   — `diff` of the two results files is empty (6.55). No two same-class
+>   detections ever fell between those radii. That axis has no lever arm and
+>   should not be swept again.
+>
+> **The remaining ~15 arms are not worth running at this SR.** They would cost
+> about a day of GPU to produce the same non-answer. The sequencing that does
+> change the numbers is Week 11's prerequisite anyway: retrain the detector on
+> the HM3D data now downloading, re-measure, and sweep afterwards if the
+> operating point has moved enough for an arm to be distinguishable. If a sweep
+> is wanted before then, run it on `ever_matched` and `node_error_m`, which every
+> subtask contributes to, rather than on success.
 
 **Prereqs:** Week 9 baseline established.
 
