@@ -2164,7 +2164,7 @@ Three tests asserted `z = +depth` and had been encoding the bug; they now assert
 `z = -depth`. Worth remembering that a green suite only pins whatever convention
 the tests were written against.
 
-#### 6.27 Open: navigation regressed after the geometry was corrected
+#### 6.27 Navigation regressed after the geometry was corrected (resolved 2026-08-16)
 
 Honest status. With the mirrored map, obstacles were placed *behind* the agent,
 so the space ahead read as free and the agent wandered unobstructed by accident.
@@ -2185,6 +2185,49 @@ agent may overshoot waypoints and drift into walls. Neither is measured yet.
 Also unresolved: `map says FREE` agreement is only 42.8%, i.e. the map is
 over-generous about free space near walls, which is consistent with the
 overshoot theory.
+
+**Resolution (2026-08-16, commit `7e86a17`).** The overshoot theory was right,
+and four more defects were sitting with it. Recorded here rather than as a new
+numbered entry so the existing cross-references keep pointing at the right
+text.
+
+1. The occupancy grid was a fixed 24 m window pinned to the **world** origin,
+   and `HabitatEnv.get_scene_bounds()` was dead code. Over the 36 val scenes,
+   **18 do not fit** inside that window and 4 exceed 24 m outright (00894 spans
+   33.8 m), so half the val set had regions the agent could never map. The grid
+   is now sized and centred per scene.
+2. `plan_astar` treated unknown cells as ordinary free space -- the comment
+   claimed otherwise -- and applied obstacle inflation as a `+3.0` cost rather
+   than a constraint, routing the agent through its own 0.20 m safety margin
+   against a 0.17 m radius. Inflation is now impassable; unknown stays passable
+   but penalised, because frontier goals sit on the unknown boundary.
+3. `_follow_path` aimed 3 cells (0.15 m) ahead of a 0.25 m step and advanced
+   its cursor 4 cells per 5-cell move, so the aim point drifted *behind* the
+   agent. Replaced with pure pursuit, and the final waypoint got a much tighter
+   arrival radius than intermediate ones -- sharing the loose radius made every
+   waypoint count as reached once the path was short, stranding the agent
+   1.4-2.1 m from a 1.0 m success radius.
+4. **Collisions were invisible.** `env.step()` discarded habitat's result and
+   the flag was set only on an `Observation` that `run_episode` throws away, so
+   the agent pressed forward into a wall for an entire subtask -- measured at
+   200 consecutive forwards for 0.00 m. The flag now persists on the env, and
+   the agent marks the cell ahead occupied and replans.
+5. Paths were only replanned when exhausted, never revalidated against a map
+   that updates every step. Frontiers are also retired on arrival rather than
+   on selection, which used to blacklist a frontier the agent was still driving
+   toward.
+
+| | before | after |
+|---|---|---|
+| blocked forward commands | 41% | **0%** |
+| map says OCCUPIED yet navmesh says navigable | 45% | **0%** |
+| median distance to goal | 6.39 m | **3.68 m** |
+| SR (2-episode smoke, 17 subtasks) | 0 | 0 |
+
+SR did not move: subtasks stalled at 1.2-3.7 m instead of failing to move at
+all. `tests/test_path_following.py` now drives the follower in closed loop
+against the real motion model, which replaces tuning constants against a
+12-minute eval.
 
 ### 2026-08-17 — The visualiser, and the failure moving into perception
 

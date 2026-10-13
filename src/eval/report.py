@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, fields
 
 from src.eval.runner import SubtaskResult
 from src.eval.metrics import aggregate_metrics
@@ -26,11 +26,11 @@ def save_results(
 
     # results.csv
     csv_path = os.path.join(output_dir, "results.csv")
-    fieldnames = [
-        "episode_id", "subtask_index", "category", "modality",
-        "success", "spl", "distance_to_goal", "steps_taken",
-        "actual_path_length", "shortest_path_length", "reason", "wall_time_s",
-    ]
+    # Derived from the dataclass rather than hand-listed: the hand-listed
+    # version silently went stale when SubtaskResult gained a field, and
+    # DictWriter raises on the extra key -- at the first per-scene checkpoint,
+    # hours into a run.
+    fieldnames = [f.name for f in fields(SubtaskResult)]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -52,6 +52,16 @@ def save_results(
     summary["total_episodes"] = len(set(r.episode_id for r in results))
     summary["avg_steps"] = sum(r.steps_taken for r in results) / max(len(results), 1)
     summary["avg_wall_time_s"] = sum(r.wall_time_s for r in results) / max(len(results), 1)
+    # Success is scored on the benchmark's geometric visibility test. This is
+    # the stricter reading -- navigated there AND the detector recognised it in
+    # the final frame -- kept alongside so neither number is lost.
+    n = max(len(results), 1)
+    summary["sr_detector_agrees"] = sum(
+        1 for r in results if r.success and r.detector_in_view
+    ) / n
+    summary["detector_in_view_rate"] = sum(
+        1 for r in results if r.detector_in_view
+    ) / n
 
     summary_path = os.path.join(output_dir, "summary.json")
     with open(summary_path, "w") as f:
@@ -70,9 +80,11 @@ def save_results(
                     "reason": r.reason,
                     "distance_to_goal": r.distance_to_goal,
                     "steps_taken": r.steps_taken,
+                    "detector_in_view": r.detector_in_view,
                 }
                 f.write(json.dumps(line) + "\n")
 
     print(f"Results saved to {output_dir}/")
-    print(f"  SR: {summary['overall_sr']:.1%}  SPL: {summary['overall_spl']:.3f}")
+    print(f"  SR: {summary['overall_sr']:.1%}  SPL: {summary['overall_spl']:.3f}"
+          f"  (detector also agrees: {summary['sr_detector_agrees']:.1%})")
     print(f"  {len(results)} subtasks, {summary['total_episodes']} episodes")

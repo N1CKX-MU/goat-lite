@@ -199,3 +199,50 @@ class TestInstanceInView:
         assert instance_in_view(
             np.array([5.0, 1.41, 3.0]), _camera_at(x=5.0, z=5.0), _K(), _depth(1.8)
         ) is True
+
+
+class TestSaveResults:
+    """results.csv used a hand-listed fieldname set. Adding a field to
+    SubtaskResult therefore broke the writer -- and because results are
+    checkpointed per scene, the crash lands hours into a run."""
+
+    def test_round_trip_includes_every_field(self, tmp_path):
+        import csv as _csv
+        import json as _json
+        from dataclasses import fields
+        from src.eval.report import save_results
+        from src.eval.runner import SubtaskResult
+
+        results = [
+            SubtaskResult(
+                episode_id="3", subtask_index=0, category="mirror",
+                modality="category", success=True, spl=0.8,
+                distance_to_goal=0.91, steps_taken=15,
+                actual_path_length=3.2, shortest_path_length=2.9,
+                reason="success", wall_time_s=1.5, detector_in_view=False,
+            ),
+            SubtaskResult(
+                episode_id="3", subtask_index=1, category="picture",
+                modality="language", success=False, spl=0.0,
+                distance_to_goal=3.15, steps_taken=500,
+                actual_path_length=9.0, shortest_path_length=4.0,
+                reason="timeout", wall_time_s=40.0, detector_in_view=True,
+            ),
+        ]
+        save_results(results, str(tmp_path))
+
+        with open(tmp_path / "results.csv") as f:
+            rows = list(_csv.DictReader(f))
+        assert len(rows) == 2
+        for f_ in fields(SubtaskResult):
+            assert f_.name in rows[0]
+
+        summary = _json.loads((tmp_path / "summary.json").read_text())
+        assert summary["overall_sr"] == 0.5
+        # Scored success whose detector stayed silent must not be counted here.
+        assert summary["sr_detector_agrees"] == 0.0
+        assert summary["detector_in_view_rate"] == 0.5
+
+        lines = (tmp_path / "failures.jsonl").read_text().strip().splitlines()
+        assert len(lines) == 1
+        assert _json.loads(lines[0])["reason"] == "timeout"
