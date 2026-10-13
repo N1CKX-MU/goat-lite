@@ -44,6 +44,43 @@ class PerceptionPipeline:
         self._min_crop_size = min_crop_size
         self._thumbnail_size = thumbnail_size
 
+    def embed_goal_image(
+        self, rgb: np.ndarray, cls_name: str
+    ) -> np.ndarray | None:
+        """CLIP-embed a goal view, cropped the way instance crops are cropped.
+
+        An image goal names one specific instance, and the matcher compares the
+        goal against stored instance embeddings. Those are CLIP over *detector
+        crops*, so embedding the whole goal frame would compare two different
+        distributions: the goal object covers about a third of its frame, while
+        a node embedding is a tight box around an object.
+
+        Running the detector on the goal view and cropping its best box of the
+        goal class makes both sides identical by construction. If the detector
+        does not fire on the goal class, there is nothing honest to compare and
+        the caller falls back to category matching.
+
+        Returns an L2-normalised embedding, or None.
+        """
+        detections = self._detector.detect(rgb)
+        h, w = rgb.shape[:2]
+        best, best_conf = None, -1.0
+        for det in detections:
+            if det.cls_name != cls_name:
+                continue
+            x1, y1, x2, y2 = det.bbox
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 - x1 < self._min_crop_size or y2 - y1 < self._min_crop_size:
+                continue
+            if det.conf > best_conf:
+                best, best_conf = (x1, y1, x2, y2), det.conf
+        if best is None:
+            return None
+        x1, y1, x2, y2 = best
+        embeds = self._encoder.encode_image([rgb[y1:y2, x1:x2]])
+        return embeds[0] if len(embeds) else None
+
     def process(self, obs: Observation, step: int) -> list[PerceivedInstance]:
         detections = self._detector.detect(obs.rgb)
         if not detections:

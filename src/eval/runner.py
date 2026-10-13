@@ -106,6 +106,68 @@ def _make_goal_spec(subtask: SubtaskSpec) -> GoalSpec:
         )
 
 
+def _embed_image_goal(env: HabitatEnv, agent, subtask: SubtaskSpec):
+    """Render the goal picture for an image subtask and CLIP-embed it.
+
+    An image subtask hands the agent a photograph of ONE instance, and only
+    that instance is credited. The matcher used to ignore the picture entirely
+    and go to the nearest instance of the category: measured over the dev
+    subset, 61% of image subtasks have more than one instance of the goal
+    category in the scene, so the referenced one was picked with probability
+    about 0.58.
+
+    The episode files give each goal ~59 `image_goals`, each a camera pose with
+    `frame_coverage` and `object_coverage`. These are SENSOR poses, not agent
+    poses -- in the first val shard an image goal sits at y = +0.58 while the
+    corresponding agent viewpoint sits at y = -0.58, i.e. about 1.17 m lower.
+    Setting the agent base to a sensor pose would therefore render from 1.41 m
+    too high. The sensor state is set directly instead, with
+    `infer_sensor_states=False` so habitat does not recompute it from the base.
+
+    Returns an embedding, or None when there is no image goal or the detector
+    does not fire on the goal class in the goal's own picture -- in which case
+    the matcher falls back to category matching.
+    """
+    gi = subtask.goal_info
+    if gi is None:
+        return None
+
+    saved = env._agent.get_state()
+    try:
+        if gi.image_goals:
+            # Best-framed view of the object.
+            best = max(gi.image_goals,
+                       key=lambda g: float(g.get("object_coverage", 0.0)))
+            st = env._agent.get_state()
+            for sensor_state in st.sensor_states.values():
+                sensor_state.position = np.asarray(
+                    best["position"], dtype=np.float64)
+                sensor_state.rotation = quaternion_from_coeffs(best["rotation"])
+            env._agent.set_state(st, infer_sensor_states=False)
+        elif gi.view_points:
+            # No pre-rendered goal views: fall back to the highest-IoU
+            # ground-truth viewpoint, which IS an agent state.
+            best = max(gi.view_points, key=lambda v: float(v.get("iou", 0.0)))
+            st = habitat_sim.AgentState()
+            st.position = np.asarray(
+                best["agent_state"]["position"], dtype=np.float64).tolist()
+            st.rotation = quaternion_from_coeffs(best["agent_state"]["rotation"])
+            env._agent.set_state(st)
+        else:
+            return None
+
+        rgb = env._make_obs().rgb
+        embed_fn = getattr(agent.perception, "embed_goal_image", None)
+        if embed_fn is None:
+            return None
+        return embed_fn(rgb, subtask.category)
+    except Exception:
+        # A goal picture is an optimisation, never a reason to lose a subtask.
+        return None
+    finally:
+        env._agent.set_state(saved)
+
+
 def run_episode(
     env: HabitatEnv,
     agent,
@@ -147,6 +209,8 @@ def run_episode(
 
         # Set goal
         goal_spec = _make_goal_spec(subtask)
+        if subtask.modality == "image":
+            goal_spec.goal_embedding = _embed_image_goal(env, agent, subtask)
         env.set_goal(goal_spec)
 
         # Reset agent (keep memory from previous subtasks)

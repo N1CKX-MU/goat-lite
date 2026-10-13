@@ -336,3 +336,62 @@ class TestEvidenceGate:
         goal = GoalSpec(modality="language", value="a chair by the window",
                         category="chair")
         assert matcher.match(goal, db)[0] is None
+
+
+class TestImageGoals:
+    """An image subtask names ONE instance and only that one is credited, but
+    image goals used to route through category matching -- the nearest instance
+    of the class, with the goal picture unused. 61% of dev-subset image
+    subtasks have more than one instance of the goal category in the scene."""
+
+    def _db_two_chairs(self):
+        """A near chair and a far chair with distinguishable embeddings."""
+        db = InstanceDatabase()
+        db.update([_make_pi(cls_name="chair", world_xyz=(1.0, 0.5, 0.0),
+                            embed_seed=7, conf=0.9)], step=0)
+        db.update([_make_pi(cls_name="chair", world_xyz=(9.0, 0.5, 0.0),
+                            embed_seed=8, conf=0.9)], step=1)
+        near, far = db.all_nodes()
+        return db, near, far
+
+    def test_goal_image_overrides_proximity(self):
+        db, near, far = self._db_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        # The goal picture looks like the FAR chair.
+        goal = GoalSpec(modality="image", value="chair", category="chair",
+                        goal_embedding=far.clip_embed.copy())
+
+        node, score = matcher.match(goal, db, np.array([0.0, 0.0]))
+        assert node.node_id == far.node_id, "should follow appearance, not distance"
+        assert score > 0.9
+
+    def test_without_a_goal_image_falls_back_to_nearest(self):
+        db, near, _ = self._db_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="image", value="chair", category="chair")
+
+        node, _ = matcher.match(goal, db, np.array([0.0, 0.0]))
+        assert node.node_id == near.node_id
+
+    def test_threshold_keeps_the_agent_exploring(self):
+        db, near, far = self._db_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder(), image_threshold=0.99)
+        goal = GoalSpec(modality="image", value="chair", category="chair",
+                        goal_embedding=_make_embed(99))
+
+        node, _ = matcher.match(goal, db, np.array([0.0, 0.0]))
+        assert node is None
+
+    def test_image_goals_honour_exclusions_and_the_evidence_gate(self):
+        db, near, far = self._db_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="image", value="chair", category="chair",
+                        goal_embedding=far.clip_embed.copy())
+
+        node, _ = matcher.match(goal, db, np.array([0.0, 0.0]),
+                                exclude_ids={far.node_id})
+        assert node is not None and node.node_id == near.node_id
+
+        gated = GoalMatcher(encoder=FakeEncoder(), min_observations=5,
+                            trust_confidence=1.1)
+        assert gated.match(goal, db, np.array([0.0, 0.0]))[0] is None

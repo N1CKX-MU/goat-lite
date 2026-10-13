@@ -22,6 +22,11 @@ class GoalSpec:
     # description against every remembered instance regardless of class and
     # will happily return a window for "microwave".
     category: str | None = None
+    # For image goals: a CLIP embedding of the goal view, cropped by the
+    # detector so it comes from the same distribution as the instance
+    # embeddings in memory. None means the goal image was unavailable or the
+    # detector did not fire on it, and the matcher falls back to the category.
+    goal_embedding: "np.ndarray | None" = None
 
 
 @dataclass
