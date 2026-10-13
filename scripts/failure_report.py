@@ -49,8 +49,9 @@ def _load(results_dir: str) -> list[dict]:
         r["distance_to_goal"] = float(r["distance_to_goal"])
         r["actual_path_length"] = float(r["actual_path_length"])
         # Diagnostics, absent from runs made before they were added.
-        if "ever_matched" in r:
-            r["ever_matched"] = r["ever_matched"] == "True"
+        for k in ("ever_matched", "image_goal_embedded"):
+            if k in r:
+                r[k] = r[k] == "True"
         for k in ("node_error_m", "explored_m2"):
             if k in r:
                 r[k] = float(r[k]) if r[k] not in ("", "nan") else float("nan")
@@ -128,6 +129,15 @@ def _diagnosis(rows: list[dict]) -> str:
           f"{100.0 * _med('steps_' + s_) / max(total, 1):.0f}%")
          for s_ in ("searching", "approaching", "verifying")],
     )
+    img = [r for r in rows if r["modality"] == "image"
+           and "image_goal_embedded" in r]
+    if img:
+        got = sum(1 for r in img if r["image_goal_embedded"])
+        out += (f"\nImage subtasks whose goal picture yielded an embedding: "
+                f"**{got}/{len(img)}** ({100.0 * got / len(img):.0f}%). The "
+                f"rest fell back to category matching, which bounds how much "
+                f"image-goal matching can help.\n")
+
     out += (f"\nMedian floor area explored by the end: "
             f"**{_med('explored_m2'):.1f} m2**. For scale, the 22 dev-subset "
             f"scenes have a median navigable area of 88.9 m2 (max 291.8), and "

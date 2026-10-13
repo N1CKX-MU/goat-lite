@@ -40,6 +40,10 @@ class SubtaskResult:
     steps_approaching: int = 0
     steps_verifying: int = 0
     explored_m2: float = 0.0        # floor area the map had explored at the end
+    # Image subtasks only: did rendering the goal picture yield an embedding?
+    # False means the subtask fell back to category matching, which bounds how
+    # much image-goal matching can help at all.
+    image_goal_embedded: bool = False
     # Did the agent's own detector also fire on the goal class in the final
     # frame? Not part of the success criterion -- success uses the benchmark's
     # geometric visibility test -- but recorded so the stricter
@@ -106,6 +110,9 @@ def _make_goal_spec(subtask: SubtaskSpec) -> GoalSpec:
         )
 
 
+_IMAGE_GOAL_WARNED = False
+
+
 def _embed_image_goal(env: HabitatEnv, agent, subtask: SubtaskSpec):
     """Render the goal picture for an image subtask and CLIP-embed it.
 
@@ -161,8 +168,20 @@ def _embed_image_goal(env: HabitatEnv, agent, subtask: SubtaskSpec):
         if embed_fn is None:
             return None
         return embed_fn(rgb, subtask.category)
-    except Exception:
-        # A goal picture is an optimisation, never a reason to lose a subtask.
+    except Exception as e:
+        # A goal picture is an optimisation, never a reason to lose a subtask --
+        # but a broad except is how a feature dies silently. If this path were
+        # broken (a renamed field, a habitat API change), every image subtask
+        # would quietly fall back to category matching and the numbers would
+        # still look plausible, which is the failure mode of engineering-log
+        # 6.46. Warn once per process so a systematic failure is visible, and
+        # record per subtask whether a goal picture was actually obtained.
+        global _IMAGE_GOAL_WARNED
+        if not _IMAGE_GOAL_WARNED:
+            _IMAGE_GOAL_WARNED = True
+            print(f"  WARNING: image-goal rendering failed "
+                  f"({type(e).__name__}: {e}); image subtasks will fall back "
+                  f"to category matching", flush=True)
         return None
     finally:
         env._agent.set_state(saved)
@@ -211,6 +230,7 @@ def run_episode(
         goal_spec = _make_goal_spec(subtask)
         if subtask.modality == "image":
             goal_spec.goal_embedding = _embed_image_goal(env, agent, subtask)
+        image_goal_embedded = goal_spec.goal_embedding is not None
         env.set_goal(goal_spec)
 
         # Reset agent (keep memory from previous subtasks)
@@ -382,6 +402,7 @@ def run_episode(
             steps_approaching=state_steps.get("approaching", 0),
             steps_verifying=state_steps.get("verifying", 0),
             explored_m2=explored_m2,
+            image_goal_embedded=image_goal_embedded,
         ))
 
     return results
