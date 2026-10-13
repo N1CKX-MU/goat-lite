@@ -113,3 +113,76 @@ class TestFindFrontiers:
         assert hasattr(f, "cells")
         assert len(f.centroid_ij) == 2
         assert f.size > 0
+
+
+class TestGroupingIsEquivalent:
+    """find_frontiers used to rescan the whole grid once per connected
+    component -- 233 ms per call on a 580x580 grid, against 8.8 ms for a full
+    depth update, and it is called on most exploration steps. The rewrite
+    groups labelled cells in one pass; these tests pin that the output is
+    identical, not merely similar, because the change was made while an
+    evaluation was in flight."""
+
+    @staticmethod
+    def _reference(occupancy, explored, min_size=20):
+        """The original implementation, verbatim."""
+        from scipy import ndimage
+        from src.mapping.frontier import Frontier
+        free_mask = occupancy == 0
+        unknown_mask = occupancy == -1
+        kernel = np.ones((3, 3), dtype=bool)
+        unknown_neighbor = ndimage.binary_dilation(unknown_mask, structure=kernel)
+        frontier_mask = free_mask & unknown_neighbor
+        if not np.any(frontier_mask):
+            return []
+        labeled, n_labels = ndimage.label(frontier_mask)
+        out = []
+        for label_id in range(1, n_labels + 1):
+            cells = np.argwhere(labeled == label_id)
+            size = len(cells)
+            if size < min_size:
+                continue
+            centroid = cells.mean(axis=0).astype(int)
+            out.append(Frontier(
+                centroid_ij=(int(centroid[0]), int(centroid[1])),
+                size=size, cells=cells,
+            ))
+        out.sort(key=lambda f: f.size, reverse=True)
+        return out
+
+    def _assert_same(self, occ, expl, min_size=20):
+        got = find_frontiers(occ, expl, min_size=min_size)
+        want = self._reference(occ, expl, min_size=min_size)
+        assert len(got) == len(want)
+        for a, b in zip(got, want):
+            assert a.centroid_ij == b.centroid_ij
+            assert a.size == b.size
+            assert np.array_equal(a.cells, b.cells)
+
+    def test_matches_on_random_maps(self):
+        for seed in range(6):
+            rng = np.random.RandomState(seed)
+            occ = rng.choice([-1, 0, 1], size=(120, 120),
+                             p=[0.45, 0.45, 0.10]).astype(np.int8)
+            self._assert_same(occ, occ != -1)
+
+    def test_matches_on_a_blobby_map(self):
+        """Random noise makes many tiny components; real maps make few big
+        ones, which exercises the min_size filter differently."""
+        rng = np.random.RandomState(11)
+        occ = np.full((150, 150), -1, dtype=np.int8)
+        for _ in range(6):
+            r, c = rng.randint(10, 140, size=2)
+            occ[max(0, r-25):r+25, max(0, c-25):c+25] = 0
+        occ[70:75, :] = 1
+        self._assert_same(occ, occ != -1)
+
+    def test_matches_with_no_frontiers(self):
+        occ = np.zeros((40, 40), dtype=np.int8)
+        self._assert_same(occ, np.ones((40, 40), dtype=bool))
+
+    def test_matches_with_a_permissive_min_size(self):
+        rng = np.random.RandomState(3)
+        occ = rng.choice([-1, 0, 1], size=(90, 90),
+                         p=[0.4, 0.5, 0.1]).astype(np.int8)
+        self._assert_same(occ, occ != -1, min_size=1)

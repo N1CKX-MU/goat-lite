@@ -51,18 +51,42 @@ def find_frontiers(
     # Label connected components
     labeled, n_labels = ndimage.label(frontier_mask)
 
+    # Group cells by label in ONE pass. The obvious loop --
+    #     for label_id in range(1, n_labels + 1):
+    #         cells = np.argwhere(labeled == label_id)
+    # rescans the whole grid per label. On a 29 m scene the grid is 580x580 =
+    # 336k cells and a partly explored map produces dozens of frontier
+    # fragments, so that loop measured **233 ms per call** against 8.8 ms for a
+    # full depth update. Exploration replans whenever the remaining path crosses
+    # a newly occupied cell, which while mapping a fresh scene is most steps, so
+    # this was the single largest cost in the eval loop.
+    #
+    # Sorting the labelled cells is equivalent, not merely similar: np.argwhere
+    # returns indices in row-major order, and a STABLE sort by label preserves
+    # that order within each group, so the per-frontier `cells` arrays come out
+    # identical element for element. tests/test_frontier.py asserts that
+    # against the original implementation on random grids.
+    flat_labels = labeled.ravel()
+    nz = np.flatnonzero(flat_labels)
     frontiers = []
-    for label_id in range(1, n_labels + 1):
-        cells = np.argwhere(labeled == label_id)
-        size = len(cells)
-        if size < min_size:
-            continue
-        centroid = cells.mean(axis=0).astype(int)
-        frontiers.append(Frontier(
-            centroid_ij=(int(centroid[0]), int(centroid[1])),
-            size=size,
-            cells=cells,
-        ))
+    if nz.size:
+        lab = flat_labels[nz]
+        order = np.argsort(lab, kind="stable")
+        nz, lab = nz[order], lab[order]
+        _, starts, counts = np.unique(lab, return_index=True,
+                                         return_counts=True)
+        rows, cols = np.unravel_index(nz, labeled.shape)
+        for start, count in zip(starts, counts):
+            if count < min_size:
+                continue
+            sl = slice(start, start + count)
+            cells = np.stack((rows[sl], cols[sl]), axis=1)
+            centroid = cells.mean(axis=0).astype(int)
+            frontiers.append(Frontier(
+                centroid_ij=(int(centroid[0]), int(centroid[1])),
+                size=int(count),
+                cells=cells,
+            ))
 
     # Sort by size descending
     frontiers.sort(key=lambda f: f.size, reverse=True)
