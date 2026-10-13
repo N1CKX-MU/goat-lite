@@ -732,29 +732,69 @@ class GoatAgent:
 
 ### 7.9 Week 9 — Development eval + debugging
 
-> **STATUS (2026-08-08) — pick up here tomorrow.**
-> Week 9 blocked on one thing: the detector. Baseline SR = 0% because the stock
-> COCO YOLOv8n can't see 30/36 GOAT categories. Fix in flight: friend is
-> finetuning YOLOv8n on HM3D-Semantics → will send back `checkpoints/yolo_goat.pt`
-> (see `TRAIN_YOLO.md`). All wiring + two control bugs already fixed and pushed:
-> - matcher image-modality routing, FSM premature-quit (commit 3398064)
-> - **heading convention in `path_to_action`** (commit 2f7693d) — VERIFIED
->   end-to-end in sim: agent turns the correct way in all 4 directions and
->   drives to target. Was inverted 180° + swapped turn signs → spin-in-place.
+> **STATUS (2026-10-13).** Week 9's artifacts exist and SR is no longer 0, but
+> the baseline is **below** this section's target and the gate below applies.
 >
-> **Tomorrow's checklist (in order):**
-> 1. [ ] Drop `yolo_goat.pt` into `checkpoints/` once it arrives; confirm it loads:
->        `python -c "from ultralytics import YOLO; m=YOLO('checkpoints/yolo_goat.pt'); print(len(m.names))"` (expect 36).
-> 2. [ ] Smoke test: run `python scripts/run_dev_eval.py --n-episodes 2` and
->        confirm **SR > 0** (proves detector + control now close the loop).
-> 3. [ ] If SR>0: launch full 30-ep dev eval in BACKGROUND with `python -u`
->        (buffered stdout otherwise), notify-on-done.
-> 4. [ ] Diagnose top failure bucket from `failures.jsonl`, one fix cycle.
-> 5. [ ] Then proceed to Week 10 ablations below.
+> **Development evaluation, memory-on arm** — 30 episodes, 218 subtasks, 22
+> scenes, 500 steps per subtask, `outputs/dev_eval_20261013_memon/`:
 >
-> If SR still 0 after the finetuned detector: check (a) cls_name equality
-> between detector vocab and GOAT categories, (b) `success_distance`/`world_xyz`
-> noise, (c) whether `image` subtasks localize by category as intended.
+> | | |
+> |---|---|
+> | SR | **2.8%** (6/218) |
+> | SPL | 0.026 |
+> | SR where the detector also fired at the stop | 0.5% |
+> | median final distance to goal | 4.49 m |
+> | subtasks that called STOP at all | 30.3% |
+>
+> By modality: category 3.7%, language 4.3%, **image 0.0%**. By category,
+> successes occur only in `mirror` (7.5% of 40), `picture` (7.4% of 27) and
+> `microwave` (7.1% of 14) — the three the detector can actually see. Every
+> other category is 0%, including all 20 `rug` subtasks, which Section 6.42 of
+> the engineering log predicts: a rug's centroid cannot be framed from inside
+> the success radius with a 1.41 m camera and no pitch action.
+>
+> **Lifelong curve** (SR by subtask index, memory-on): 0.0, 0.0, 3.3, 3.3, 3.3,
+> 0.0, 5.9, 6.7, 0.0, 16.7%. Upward, but the later indices carry 6–17 subtasks
+> each, so this is suggestive and not yet a result. The memory-off arm is
+> running on identical episodes for the paired comparison.
+>
+> **Week 9 done criteria: met.**
+> - [x] `run_dev_eval.py` produces the full artifacts — `results.csv`,
+>       `summary.json`, `failures.jsonl`, plus a generated
+>       `failure_notes.md` (`scripts/failure_report.py`).
+> - [x] Debugging cycles completed with measurable improvement — the stop
+>       decision (6.35–6.37), which produced the first scored successes, and the
+>       unreachable-goal livelock (6.47).
+> - [x] Failure taxonomy documented — generated from the artifacts rather than
+>       transcribed, so it cannot drift from them.
+>
+> **This section's gate says: "If below 10%, stop and diagnose before Week 10."**
+> Diagnosis is done, and it is not one thing:
+>
+> | what happened | share |
+> |---|---|
+> | timed out more than 3 m away | 55.5% |
+> | stopped at the wrong object (>3 m) | 15.1% |
+> | timed out 1–3 m short | 11.9% |
+> | stopped 1–3 m short | 11.0% |
+> | **success** | 2.8% |
+> | reached the goal but never stopped | 2.3% |
+> | stopped inside the radius, goal not visible | 1.4% |
+>
+> Three fixes are already implemented and land in the next run, in expected
+> order of value:
+> 1. **Unreachable goals no longer burn the budget** (6.47). 22.4% of subtasks
+>    spent all 500 steps having moved < 0.01 m, with zero successes, because an
+>    unreachable matched node was re-approached forever. Freed: ~485 steps each.
+> 2. **Image-goal matching** (6.43). Image is 0/67 here, and these runs predate
+>    the fix — they localise image goals by category, which picks the referenced
+>    instance with probability ≈0.58.
+> 3. **The commit band** (6.37), which stops the agent inside the radius rather
+>    than on its boundary.
+>
+> So Week 10 is entered with the gate acknowledged rather than ignored: re-run
+> the baseline with these three, then sweep. `scripts/sweep.py` and the exposed
+> knobs are ready.
 
 **Prereqs:** Week 8 done.
 
@@ -1037,4 +1077,4 @@ Note them in the Future Work section of the report — they make the story feel 
 
 ---
 
-**Last updated:** at project start. Update the "Last updated" date and add a dated note under each Section 7.N as you close out that week.
+**Last updated:** 2026-10-13 — Section 7.9 carries the development-evaluation status, Section 8 a note on how the visibility criterion is implemented, and Section 7.13 the promotion of image goals from stretch to required.
