@@ -229,3 +229,52 @@ class TestTemplateWrapping:
 
         assert len(calls) == 1
         assert calls[0] == "the chair with red cushion near the window"
+
+
+class TestExclusions:
+    """The agent rules out nodes it approached and could not confirm, and the
+    matcher must then fall through to the next candidate rather than to None --
+    the dev subset has a median of 4 instances of a category per scene, so the
+    next one is usually worth trying."""
+
+    def _db_with_two_chairs(self) -> InstanceDatabase:
+        db = InstanceDatabase()
+        db.update([_make_pi(cls_name="chair", world_xyz=(1.0, 0.5, 0.0),
+                            embed_seed=1)], step=0)
+        db.update([_make_pi(cls_name="chair", world_xyz=(5.0, 0.5, 0.0),
+                            embed_seed=2)], step=1)
+        return db
+
+    def test_excluded_node_yields_the_next_nearest(self):
+        db = self._db_with_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="category", value="chair")
+        agent_xy = np.array([0.0, 0.0])
+
+        near, _ = matcher.match(goal, db, agent_xy)
+        assert np.isclose(near.world_xyz[0], 1.0)
+
+        far, _ = matcher.match(goal, db, agent_xy, exclude_ids={near.node_id})
+        assert far is not None
+        assert far.node_id != near.node_id
+        assert np.isclose(far.world_xyz[0], 5.0)
+
+    def test_excluding_everything_reports_not_found(self):
+        db = self._db_with_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder())
+        goal = GoalSpec(modality="category", value="chair")
+        ids = {n.node_id for n in db.all_nodes()}
+
+        node, score = matcher.match(goal, db, np.array([0.0, 0.0]), exclude_ids=ids)
+        assert node is None
+        assert score == 0.0
+
+    def test_language_honours_exclusions(self):
+        db = self._db_with_two_chairs()
+        matcher = GoalMatcher(encoder=FakeEncoder(), language_threshold=-1.0)
+        goal = GoalSpec(modality="language", value="a chair by the window",
+                        category="chair")
+        ids = {n.node_id for n in db.all_nodes()}
+
+        assert matcher.match(goal, db, exclude_ids=ids)[0] is None
+        assert matcher.match(goal, db)[0] is not None

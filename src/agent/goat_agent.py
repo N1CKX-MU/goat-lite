@@ -11,7 +11,7 @@ from src.sim.env import Observation
 from src.planning.astar import plan_astar
 from src.planning.exploration import choose_frontier
 from src.mapping.frontier import find_frontiers
-from src.agent.action import path_to_action
+from src.agent.action import bearing_error, path_to_action
 
 
 # Turn ~360° (30°/turn) surveying for frontiers before concluding the area is
@@ -34,6 +34,14 @@ FINAL_ARRIVE_CELLS = 2
 # Re-plan periodically: the map changes every step, and a path planned through
 # what later turns out to be a wall was otherwise followed to its end.
 REPLAN_EVERY_STEPS = 15
+# Verification budget, in steps. One full 360° survey at 30°/turn. The old
+# budget of 5 could not even bring a goal 150° off-axis into frame, so a goal
+# behind the agent was unconfirmable no matter how long the subtask ran.
+VERIFY_GIVEUP_STEPS = 12
+# A target within this bearing counts as "in frame". The camera's horizontal
+# FOV is 90° (so 45° either side) and one turn is 30°, which leaves margin for
+# the object's own extent at the edge of the image.
+VERIFY_FACING_TOL = math.radians(30.0)
 
 
 class AgentState(enum.Enum):
@@ -82,6 +90,7 @@ class GoatAgent:
         self._verify_steps = 0
         self._steps_since_replan = 0
         self._frontier_target: tuple[int, int] | None = None
+        self._rejected_nodes: set[int] = set()
 
     def reset(self, obs: Observation, keep_memory: bool = False) -> None:
         """Reset for a new subtask. If keep_memory, preserve memory and map."""
@@ -96,6 +105,9 @@ class GoatAgent:
         self._verify_steps = 0
         self._steps_since_replan = 0
         self._frontier_target = None
+        # Rejections are per-subtask: a node that could not be confirmed from
+        # one arrival may well be confirmable when approached from elsewhere.
+        self._rejected_nodes = set()
 
         if not keep_memory:
             pass  # memory.clear() would go here if InstanceDatabase had a clear method
@@ -130,7 +142,10 @@ class GoatAgent:
         # Pass the agent's position so category/image goals resolve to the
         # nearest qualifying instance rather than the most confident one.
         matched_node, score = self.matcher.match(
-            self._current_goal, self.memory, self._agent_xy(obs)
+            self._current_goal,
+            self.memory,
+            self._agent_xy(obs),
+            exclude_ids=self._rejected_nodes,
         )
 
         # 3. State transitions
@@ -158,12 +173,12 @@ class GoatAgent:
             if self._goal_in_view(detections):
                 self.state = AgentState.DONE
                 return 0  # success stop
-            if self._verify_steps >= 5:
-                # Revert to approaching, mark stale
-                self.state = AgentState.APPROACHING
-                self._current_path = None
+            if self._matched_node is None:
+                self.state = AgentState.SEARCHING
             else:
-                return 1  # move forward slowly to get a better view
+                decision = self._verify_decide(obs)
+                if decision is not None:
+                    return decision
 
         # 4. Action selection based on state
         if self.state == AgentState.APPROACHING:
@@ -290,6 +305,61 @@ class GoatAgent:
                 if best_key is None or key < best_key:
                     best, best_key = (r, c), key
         return best if best is not None else target_ij
+
+    def _verify_decide(self, obs: Observation) -> int | None:
+        """Turn to face the matched node, then commit. Never drives forward.
+
+        Three measurements shape this.
+
+        1. Episode 24 subtask 2: memory had the mirror to within 0.15 m and
+           pure pursuit delivered the agent to 0.19 m of it, but VERIFYING
+           issued FORWARD, so the agent pressed nose-to-surface against the
+           wall the mirror hangs on and the object left the frame entirely.
+           `goal_in_view` was False for all 250 steps. Arriving inside the
+           success radius and facing the goal are separate requirements.
+        2. Probing the detector around episode 24's goals: it fires from 4 of
+           56 poses at 0.5 m and 5 of 56 at 0.8 m, against 19 of 56 at 1.5 m.
+           Inside the success radius -- where the criterion *requires* the
+           agent to be -- it is nearly blind, so waiting for a fresh detection
+           before stopping discards almost every correct arrival. The decision
+           therefore rests on accumulated instance memory, which was built from
+           the distances where the detector does work.
+        3. Holding still buys nothing: the detector is deterministic, so an
+           unchanged pose yields the same frame and the same answer.
+
+        Returns an action to take, or None to fall through to the normal
+        state-based action selection.
+        """
+        err = bearing_error(
+            self._agent_xy(obs),
+            float(obs.compass),
+            self._matched_node.world_xyz[[0, 2]],
+        )
+        if abs(err) <= VERIFY_FACING_TOL:
+            # Inside the radius, looking at it, and the detector has already
+            # had its say on this very frame at the top of the tick.
+            self.state = AgentState.DONE
+            return 0
+        if self._verify_steps < VERIFY_GIVEUP_STEPS:
+            return 2 if err > 0 else 3
+        # A full survey and the node never came into frame -- its estimated
+        # position is not where the agent can look. Drop it and move on rather
+        # than reverting to APPROACHING, which re-enters VERIFYING on the next
+        # tick (still inside the radius) with the counter reset: measured as a
+        # livelock of 32 VERIFYING ticks in 40 on a synthetic arrival.
+        self._reject_matched_node()
+        return None
+
+    def _reject_matched_node(self) -> None:
+        """Give up on the current node for the rest of this subtask."""
+        if self._matched_node is not None:
+            self._rejected_nodes.add(self._matched_node.node_id)
+        self._matched_node = None
+        self._current_path = None
+        self._path_idx = 0
+        self._no_plan_count = 0
+        self._verify_steps = 0
+        self.state = AgentState.SEARCHING
 
     def _note_collision(self, obs: Observation) -> None:
         """Mark the cell just ahead as occupied and invalidate the path.

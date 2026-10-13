@@ -64,11 +64,16 @@ class FakeMemory:
 
 
 class FakeMatcher:
-    """Returns configurable match results."""
+    """Returns configurable match results, honouring the exclusion set."""
     def __init__(self, result=None):
         self.result = result or (None, 0.0)
-    def match(self, goal, db, agent_xy=None):
-        return self.result
+        self.last_exclude = set()
+    def match(self, goal, db, agent_xy=None, exclude_ids=None):
+        self.last_exclude = set(exclude_ids or ())
+        node, score = self.result
+        if node is not None and node.node_id in self.last_exclude:
+            return None, 0.0
+        return node, score
 
 
 class FakeMap:
@@ -242,3 +247,114 @@ class TestActionOutput:
             obs = _make_obs(gps=(float(i) * 0.1, 0.0))
             action = agent.act(obs)
             assert action in (0, 1, 2, 3)
+
+
+# ── Verification: arriving is not the same as confirming ──
+
+def _apply_turn(heading: float, action: int) -> float:
+    """Advance a heading by one turn action (30 deg; left increases)."""
+    if action == 2:
+        return heading + math.radians(30.0)
+    if action == 3:
+        return heading - math.radians(30.0)
+    return heading
+
+
+def _verify_setup(node_xyz, detections=()):
+    """An agent already inside the success radius of a matched node."""
+    node = _make_node(world_xyz=node_xyz)
+    matcher = FakeMatcher(result=(node, 0.9))
+    agent = _make_agent(
+        matcher=matcher,
+        perception=FakePerception(detections=list(detections)),
+        success_distance=1.0,
+    )
+    agent.reset(_make_obs(gps=(0.0, 0.0)))
+    return agent, matcher, node
+
+
+class TestVerification:
+    """Measured on episode 24 subtask 2: the agent reached 0.19 m from the
+    goal with `goal_in_view` False for the entire subtask, because VERIFYING
+    drove forward instead of turning to face the object."""
+
+    def test_verifying_turns_toward_a_goal_it_cannot_see(self):
+        # Node 0.6 m BEHIND the agent: inside the success radius, out of frame.
+        from src.agent.action import bearing_error
+        agent, _, node = _verify_setup((0.0, 0.5, 0.6))
+
+        heading = 0.0
+        for _ in range(8):
+            action = agent.act(_make_obs(gps=(0.0, 0.0), heading=heading))
+            assert action in (2, 3), f"expected a turn, got {action}"
+            heading = _apply_turn(heading, action)
+            err = bearing_error(
+                np.array([0.0, 0.0]), heading, node.world_xyz[[0, 2]]
+            )
+            if abs(err) <= math.radians(30.0):
+                break
+        else:
+            pytest.fail("never turned to face the goal")
+
+    def test_verifying_never_drives_forward(self):
+        """Forward inside the success radius is what put the agent
+        nose-to-surface with a wall-mounted goal, pushing it out of frame."""
+        agent, _, _ = _verify_setup((0.0, 0.5, 0.6))
+        heading = 0.0
+        for _ in range(11):
+            action = agent.act(_make_obs(gps=(0.0, 0.0), heading=heading))
+            assert action != 1, "VERIFYING must not drive into the goal"
+            heading = _apply_turn(heading, action)
+
+    def test_verifying_stops_when_goal_comes_into_view(self):
+        det = PerceivedInstance(
+            cls_id=0, cls_name="chair", conf=0.8,
+            bbox=(50, 50, 150, 150),
+            crop_thumbnail=np.zeros((64, 64, 3), dtype=np.uint8),
+            clip_embed=_make_embed(0),
+            world_xyz=np.array([0.0, 0.5, 0.6]),
+            seen_step=0,
+        )
+        agent, _, _ = _verify_setup((0.0, 0.5, 0.6), detections=[det])
+        action = agent.act(_make_obs(gps=(0.0, 0.0)))
+        assert action == 0
+        assert agent.state == AgentState.DONE
+
+    def test_commits_once_it_faces_the_goal(self):
+        """Inside the success radius and facing its matched instance, the agent
+        must decide. Waiting for a fresh detection instead is the defect: the
+        detector fires from 5 of 56 poses at 0.8 m, so demanding one at the stop
+        pose rejects nine arrivals in ten, and reverting to APPROACHING while
+        still inside the radius re-enters VERIFYING on the next tick with the
+        counter reset -- a livelock that ran to the 500-step timeout."""
+        agent, _, _ = _verify_setup((0.0, 0.5, 0.6))
+        heading = 0.0
+        for tick in range(10):
+            action = agent.act(_make_obs(gps=(0.0, 0.0), heading=heading))
+            assert action != 1
+            if action == 0:
+                assert agent.state == AgentState.DONE
+                break
+            heading = _apply_turn(heading, action)
+        else:
+            pytest.fail("never committed to a decision")
+
+    def test_gives_up_on_a_node_it_cannot_bring_into_frame(self):
+        """Constant heading: the turns have no effect, standing in for an agent
+        that cannot get the node into frame. It must drop the node and look
+        elsewhere rather than verify it forever."""
+        agent, matcher, node = _verify_setup((0.0, 0.5, 0.6))
+        for _ in range(20):
+            agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert node.node_id in matcher.last_exclude
+        assert agent.state != AgentState.VERIFYING
+
+    def test_rejection_lasts_only_for_the_subtask(self):
+        agent, matcher, node = _verify_setup((0.0, 0.5, 0.6))
+        for _ in range(20):
+            agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert node.node_id in matcher.last_exclude
+
+        agent.reset(_make_obs(gps=(0.0, 0.0)), keep_memory=True)
+        agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert node.node_id not in matcher.last_exclude

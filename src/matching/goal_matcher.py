@@ -22,32 +22,49 @@ class GoalMatcher:
         self._use_template = use_template
 
     def match(
-        self, goal: GoalSpec, db: InstanceDatabase, agent_xy: np.ndarray | None = None
+        self,
+        goal: GoalSpec,
+        db: InstanceDatabase,
+        agent_xy: np.ndarray | None = None,
+        exclude_ids: set[int] | None = None,
     ) -> tuple[InstanceNode | None, float]:
         """Best instance in memory for this goal.
 
         ``agent_xy`` is the agent's world XZ. It only affects category/image
         goals, where any instance of the category satisfies the task and the
         nearest one is therefore the right target.
+
+        ``exclude_ids`` are node ids the caller has already ruled out -- the
+        agent passes the nodes it approached and could not confirm. Filtering
+        here rather than in the agent matters: it lets the second-best instance
+        win, which for a category goal with several instances in the scene is
+        the difference between trying the next one and giving up.
         """
         if goal.modality == "category":
-            return self._match_category(goal, db, agent_xy)
+            return self._match_category(goal, db, agent_xy, exclude_ids)
         elif goal.modality == "language":
-            return self._match_language(goal, db)
+            return self._match_language(goal, db, exclude_ids)
         elif goal.modality == "image":
             # Image goals carry the target category in `value`; with the
             # finetuned detector we localize the goal by that category.
-            return self._match_category(goal, db, agent_xy)
+            return self._match_category(goal, db, agent_xy, exclude_ids)
         else:
             return None, 0.0
+
+    @staticmethod
+    def _eligible(nodes, exclude_ids):
+        if not exclude_ids:
+            return nodes
+        return [n for n in nodes if n.node_id not in exclude_ids]
 
     def _match_category(
         self,
         goal: GoalSpec,
         db: InstanceDatabase,
         agent_xy: np.ndarray | None = None,
+        exclude_ids: set[int] | None = None,
     ) -> tuple[InstanceNode | None, float]:
-        candidates = db.query_by_class_name(goal.value)
+        candidates = self._eligible(db.query_by_class_name(goal.value), exclude_ids)
         if not candidates:
             return None, 0.0
         if agent_xy is None:
@@ -67,7 +84,10 @@ class GoalMatcher:
         return best, best.confidence
 
     def _match_language(
-        self, goal: GoalSpec, db: InstanceDatabase
+        self,
+        goal: GoalSpec,
+        db: InstanceDatabase,
+        exclude_ids: set[int] | None = None,
     ) -> tuple[InstanceNode | None, float]:
         # A GOAT-Bench language goal always describes an instance OF a known
         # category ("the mirror next to the sink" is a mirror), and that
@@ -84,6 +104,7 @@ class GoalMatcher:
             nodes = db.query_by_class_name(goal.category)
         else:
             nodes = db.all_nodes()
+        nodes = self._eligible(nodes, exclude_ids)
         if not nodes:
             return None, 0.0
 
