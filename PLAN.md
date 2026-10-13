@@ -795,6 +795,33 @@ class GoatAgent:
 > So Week 10 is entered with the gate acknowledged rather than ignored: re-run
 > the baseline with these three, then sweep. `scripts/sweep.py` and the exposed
 > knobs are ready.
+>
+> **UPDATE (2026-10-13, run #3).** The re-run with those three fixes is done,
+> both arms, `outputs/dev_eval_run3_{memon,nomem}/`. Engineering log 6.50–6.51.
+>
+> | | run #2 | run #3 |
+> |---|---|---|
+> | SR, memory on | 2.8% (6/218) | **3.2% (7/218)** |
+> | SR, memory off | 2.3% (5/218) | **3.2% (7/218)** |
+> | stationary for the whole budget | 22.4% | **0%** |
+> | image goals embedded | 0 of 5 | **67 of 67** |
+>
+> Each fix is verified working in isolation; together they bought **one extra
+> success**. The memory delta is now **exactly 0.0 pp**, so this section's
+> successor gate in 7.10 is *not* met and must not be recorded as met.
+>
+> The diagnosis has moved, and this is what should drive Week 10. The agent
+> explores a median of **86.0 m²** against a median navigable area of
+> **88.9 m²** — essentially the whole scene — and **58.3% of failures never
+> match a candidate at all**. Of the 43.6% of subtasks that do match, the node
+> is a median of **3.83 m** from the nearest true instance (28 of 95 within
+> 1 m). Exploration and the stop rule are no longer the binding constraints;
+> detection and matcher precision are.
+>
+> **Consequence for the sweep below:** none of its axes acts on detection, and
+> at 3.2% SR a six-arm grid separates arms by one or two successes. The sweep
+> proceeds as 7.10 specifies; this is a caveat on reading its table, not a
+> reason to skip it. See 7.10's status note.
 
 **Prereqs:** Week 8 done.
 
@@ -829,6 +856,38 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 ---
 
 ### 7.10 Week 10 — Hyperparameter sweep + ablation setup
+
+> **STATUS (2026-10-13).** The ablation infrastructure is built and has been run
+> twice; the done criteria below are **1 of 3 met**.
+>
+> - [x] Memory-on vs memory-off run on identical episodes, paired by position,
+>       `scripts/sweep.py` and every knob exposed as a flag.
+> - [ ] All planned ablations run — the five grids have not been run, and are
+>       deliberately deferred; see below.
+> - [ ] Best config identified and written into `configs/agent_default.yaml`.
+> - [ ] **Memory on-vs-off delta > 0 — NOT MET.** It is exactly **0.0 pp**
+>       (7/218 against 7/218). This section says "if not, memory is broken — go
+>       back". The more defensible reading, from 6.50, is that the delta is
+>       *unresolvable* rather than negative: with 7 successes, one subtask is
+>       1.4 pp, so no delta smaller than that can be measured at all. Memory is
+>       not demonstrably broken; it is unmeasurable at this SR.
+>
+> **The grids are run as this section specifies** (decision 2026-10-13). The
+> measured caveat is recorded here rather than acted on: every axis below —
+> language threshold, merge distance, merge similarity, encoder choice, success
+> distance, planner, frontier scoring — acts on a stage the median subtask never
+> reaches, since 58.3% of failures never match a candidate and the agent already
+> covers ~97% of the navigable area. At 3.2% SR one success is 1.4 pp, so arms
+> separated by a single subtask are not separated. Read the resulting table with
+> that resolution in mind, and treat a winner as provisional unless it clears
+> its neighbours by more than one or two successes.
+>
+> Sweep on 10 episodes to rank, confirm the winner on 30, per this section's own
+> budget note. `scripts/sweep.py` drives it and every knob is a flag.
+>
+> The in-radius detector ceiling (`scripts/detector_ceiling.py`) is measured
+> alongside as a cheap Week 9 diagnostic. It bounds what any arm could score,
+> but it does not gate the sweep.
 
 **Prereqs:** Week 9 baseline established.
 

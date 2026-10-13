@@ -804,11 +804,86 @@ matching is therefore reclassified from an optional extension to required work
 
 ### 4.6 Results IV — End-to-End Status
 
-**Current end-to-end Success Rate: 0%** (2-episode smoke test, 17 subtasks). All
-subtasks end in timeout or a stop at the wrong object. What has changed over
-development is not the number but **where the failure sits**.
+**Success Rate on the development subset: 3.2%** (7 of 218 subtasks, 30
+episodes of `val_unseen`, seed 42), SPL 0.028. Two full evaluations were run,
+before and after the fixes of §4.5.1, and the pair is more informative than
+either number:
 
-Per-subtask traces on the development episodes, 250 steps each:
+| | run #2 | run #3 (current) |
+|---|---|---|
+| SR, memory on | 2.8% (6/218) | **3.2% (7/218)** |
+| SR, memory off | 2.3% (5/218) | **3.2% (7/218)** |
+| SPL, memory on | 0.026 | 0.028 |
+| subtasks stationary for the whole budget | 22.4% | **0%** |
+| image goals that produced an embedding | 0 of 5 | **67 of 67** |
+
+Between the runs, four defects were fixed: an unreachable goal that consumed the
+whole step budget, a stop decision that halted on the success boundary, an
+evidence gate on memory nodes, and image-goal embedding. **Every one is
+independently verified as working, and together they bought one extra success.**
+The distance between mechanism and outcome is the result of this section.
+
+#### By modality and by position in the episode
+
+| modality | n | SR | SPL | median final distance |
+|---|---|---|---|---|
+| category | 81 | 4.9% | 0.045 | 3.72 m |
+| language | 70 | 4.3% | 0.036 | 6.20 m |
+| image | 67 | **0.0%** | 0.000 | 5.19 m |
+
+Image goals now embed and match (34 of 67 matched a node) and still never score.
+That is a measurable zero rather than an inactive code path, which is the
+difference between a known limitation and a silent one.
+
+**The memory on/off delta is exactly 0.0 pp**, paired position-by-position over
+all 218 subtasks. Run #2's +0.5 pp sat in the same noise. The per-index deltas
+scatter in both directions (−3.3, −5.0, +5.9, +16.7 pp at indices 2, 5, 6, 9) on
+samples of six to thirty subtasks, so none of them is evidence of a lifelong
+trend. **The headline ablation of this project is, at this operating point,
+inconclusive** — and the reason is given below: memory amplifies perception, and
+there is not yet enough perception to amplify.
+
+#### Why the failures fail
+
+| diagnosis | n | share of failures |
+|---|---|---|
+| never matched any candidate | 123 | 58.3% |
+| committed to the wrong object (>3 m away) | 54 | 25.6% |
+| candidate was the goal; stop rule or budget lost it | 22 | 10.4% |
+| candidate near the goal (1–3 m localisation error) | 12 | 5.7% |
+
+Two numbers bound the system. Only **43.6%** of subtasks ever match a candidate,
+and among the 95 that do, the matched node sits a **median of 3.83 m** from the
+nearest true instance, with just **28 of 95 within 1 m**. The matcher is
+simultaneously recall-starved and imprecise.
+
+#### Exploration is not the binding constraint
+
+The agent explores a median of **86.0 m²** of floor per subtask. The 22
+development scenes have a median navigable area of **88.9 m²**. It covers
+substantially the whole scene and still does not match the goal in 58% of
+failures.
+
+The clearest statement of this comes from the 51 subtasks (23.4%) that stop early
+because frontier exploration is exhausted. They stop at a median of step 30 of
+500 — having explored a median of **104.3 m²**, *more* than the subtasks that ran
+the full budget (81.3 m²). There is genuinely nowhere left for them to go.
+
+This bounds the remaining work. Searching better, planning better and stopping
+better all act on stages the median subtask never reaches, and none of the
+hyperparameters in the planned sweep acts on detection at all — so the sweep's
+table should be read as a ranking at fixed perception, not as headroom. The
+measurement that bounds all of them is the **in-radius detector ceiling**: how
+many of the 218 subtasks are winnable by *any* navigator carrying this
+detector. §4.5 establishes that the detector fires from roughly 9% of poses
+at 0.8 m against 34% at 1.5 m, and §4.5.2 that 14.2% of subtasks cannot be framed
+from any scoring position at all. Until the ceiling is measured end-to-end, agent
+improvements are bets on headroom that may not exist.
+
+#### The traces that localised the stop decision
+
+These per-subtask traces drove the §4.5.1 fixes and are retained because they
+isolate each stage cleanly:
 
 | Episode / subtask | Goal | Closest approach | Outcome |
 |---|---|---|---|
@@ -835,18 +910,21 @@ delivered the agent to 0.19 m of it — planning and control both worked. What
 failed is the final decision. The agent approaches the *node position*, which for
 a wall-mounted object lies on the wall, so it arrives nose-to-surface with the
 object out of frame, and `goal_in_view` can never become true. Nothing in
-`VERIFYING` turns the agent to *face* the object; it continues issuing forward
-commands while already inside the success radius.
+`VERIFYING` turned the agent to *face* the object; it continued issuing forward
+commands while already inside the success radius. That is now fixed, and
+`mirror` is the project's best-scoring category at 10.0% of 40 subtasks.
 
-**The remaining failure mode is different and unresolved.** On `picture`
-subtasks, where the scene contains 25 valid instances and the detector is at its
-most productive, the agent stops **confidently at the wrong object**. Lowering
-detection confidence to 0.15 (§4.4) admits false positives into memory, and a
-*consistent* false positive also defeats verification — the node carries the
-detector's own label, so when the same wrong detection reappears on arrival,
-verification passes. Memory has no mechanism for disbelief: unlike the occupancy
-grid, which accumulates clamped evidence in both directions, a node created from
-a single low-confidence detection is as targetable as one seen fifty times.
+**The second failure mode is unresolved and is the 25.6% row above.** On
+`picture` subtasks, where the scene contains 25 valid instances and the detector
+is at its most productive, the agent stops **confidently at the wrong object**.
+Lowering detection confidence to 0.15 (§4.4) admits false positives into memory,
+and a *consistent* false positive also defeats verification — the node carries
+the detector's own label, so when the same wrong detection reappears on arrival,
+verification passes. The evidence gate added since run #2 (two observations, or
+one confident sighting) was aimed at exactly this and did not resolve it: a
+false positive that is *stable across frames* clears the gate as easily as a true
+one. Memory still has no mechanism for disbelief, unlike the occupancy grid,
+which accumulates clamped evidence in both directions.
 
 ### 4.7 Known Limitations
 

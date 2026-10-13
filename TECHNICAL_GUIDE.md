@@ -3039,3 +3039,94 @@ asks except stand far enough back, and nothing in the stop rule knows that
 standing closer can *lose* a subtask. A standoff that depends on the goal's
 height offset is the obvious next change, and it is now measured rather than
 guessed.
+
+#### 6.50 The second development evaluation: the fixes work and SR barely moves
+
+2026-10-13. Both arms re-run on fixed code (30 episodes, 218 subtasks, seed 42),
+memory-on and memory-off in parallel, 17.0 s per subtask wall clock.
+
+| | run #2 (baseline) | **run #3 (fixed)** |
+|---|---|---|
+| SR, memory on | 2.8% (6/218) | **3.2% (7/218)** |
+| SR, memory off | 2.3% (5/218) | **3.2% (7/218)** |
+| SPL, memory on | 0.026 | 0.028 |
+| median final distance | 4.49 m | 4.66 m |
+
+Four fixes landed between the runs -- the unreachable-goal rejection (6.47), the
+commit band (6.37), the evidence gate (6.39) and image-goal embedding (6.49).
+**Each one is individually verified below, and together they bought one extra
+success.** That gap between mechanism and outcome is the finding.
+
+**Verified: the livelock is gone.** 0 of 218 subtasks stationary, against 28 of
+125 (22.4%) in 6.47. The per-state counters confirm the budget now moves.
+
+**Verified: image goals embed.** **67 of 67** (100%), against 0 of 5 in 6.49, and
+34 of them went on to match a node. **Image SR is still 0.0%** (0/67). The
+feature is live and buys nothing yet, which is a far more useful state than
+6.49's silent inactivity -- it is now a measurable 0 rather than an absent path.
+
+**The memory ablation delta is now exactly 0.0 pp** (7 against 7, paired by
+position over all 218). Run #2's +0.5 pp was within the same noise; this is
+cleaner evidence for the same conclusion, and the per-index deltas are now
+visibly symmetric (-3.3, -5.0, +5.9, +16.7 at indices 2, 5, 6, 9), i.e. noise in
+both directions rather than a trend. PLAN.md 7.10's "delta > 0" criterion is
+**not met**, and should not be treated as met until SR can resolve one.
+
+**Where the subtasks actually go**, which is where the next work is:
+
+| diagnosis | n | share of failures |
+|---|---|---|
+| never matched any candidate | 123 | 58.3% |
+| committed to the wrong object (>3 m) | 54 | 25.6% |
+| candidate was the goal (stop rule or budget) | 22 | 10.4% |
+| candidate near the goal (1-3 m error) | 12 | 5.7% |
+
+Two numbers bound the problem. **Only 43.6% of subtasks ever match a candidate
+at all**, and of the 95 that do, the matched node's distance to the nearest true
+instance has a **median of 3.83 m** -- just **28 of 95 within 1 m**, 37 within
+2 m. So the matcher is both recall-starved and imprecise: 61% of the nodes it
+commits to are more than 2 m from anything that would score.
+
+Note: `ever_matched` reads 0 for run #2 because the column did not exist when
+that run was made. It is unpopulated, not measured -- do not compare the two.
+
+#### 6.51 A give-up that looked premature and was not (a wrong hypothesis)
+
+2026-10-13. 51 of 218 subtasks (23.4%) ended with `reason = "no_plan"` at a
+**median of step 30** out of 500, a median of 3.96 m from the goal, forfeiting
+**22,914 steps** of unused budget in total. One was already 0.61 m away.
+
+That looks exactly like premature termination, and there was a mechanism ready
+to blame: `_no_plan_count` is shared between APPROACHING and SEARCHING and is
+not reset when the approach give-up (6.47) hands control to `_act_searching`, so
+a rejected node pre-charges the search counter with 4 of its 12 turns. 34 of the
+51 had indeed been APPROACHING first. The arithmetic even fits: ~4 approach
+failures, then ~8 spins, terminating near step 30.
+
+**It is not the explanation.** Explored floor area at the moment of give-up:
+
+| reason | n | median explored | median steps |
+|---|---|---|---|
+| `no_plan` | 51 | **104.3 m2** | 30 |
+| `timeout` | 159 | 81.3 m2 | 500 |
+
+The subtasks that quit early have explored **more** than the ones that ran the
+full budget, and more than the **88.9 m2** median navigable area of the dev
+scenes. They stop because the map -- inherited from earlier subtasks in the
+episode -- is already complete and `find_frontiers` genuinely returns nothing.
+Giving up is the correct action; there is nowhere left to go. Spending the other
+470 steps would only have added wall clock.
+
+The counter pollution is real and still worth tidying, but it is not costing
+subtasks, and fixing it would have produced no measurable change while appearing
+to be progress. Third time this trap has caught me: see 6.33 and 6.47.
+
+What the table actually says is heavier than the bug I went looking for. **The
+agent explores the whole scene and still does not find the goal.** Median
+explored across all subtasks is 86.0 m2 against 88.9 m2 navigable -- roughly 97%
+coverage -- while 58.3% of failures never match a candidate. Exploration is not
+the binding constraint, and no threshold in the sweep grid acts on this. The
+next measurement that matters is the **in-radius detector ceiling** (6.35, 6.32):
+how many of the 218 subtasks are winnable at all by any navigator carrying this
+detector. Until that number exists, agent changes are guesses about headroom
+that may not be there.
