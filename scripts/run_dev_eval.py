@@ -28,7 +28,7 @@ from src.memory.instance_db import InstanceDatabase
 from src.matching.goal_matcher import GoalMatcher
 from src.agent.goat_agent import GoatAgent
 from src.eval.runner import run_episode, _resolve_scene_path
-from src.eval.report import save_results, load_results
+from src.eval.report import save_results, load_results, resumable_prefix
 
 
 def build_agent(
@@ -132,33 +132,35 @@ def main():
 
     all_results = []
     scene_count = 0
-    done_keys: set = set()
+    scenes_done = 0
 
     if args.resume:
         # Resume at SCENE granularity, never mid-episode: memory and the map
         # persist across the subtasks of an episode, so replaying half an
         # episode would start it from state it never had.
-        all_results = load_results(args.output_dir)
-        done_keys = {(r.episode_id, r.subtask_index) for r in all_results}
-        if all_results:
-            print(f"  Resuming: {len(all_results)} subtasks already on disk")
+        #
+        # The prefix is matched POSITIONALLY. (episode_id, subtask_index) is not
+        # unique across a run -- GOAT-Bench numbers episodes per scene, and over
+        # this subset 218 subtasks share only 86 such pairs -- so matching on it
+        # silently skips scenes that merely share ids with earlier ones.
+        prior = load_results(args.output_dir)
+        scene_keys = [
+            [(ep.episode_id, i) for ep in eps for i in range(len(ep.subtasks))]
+            for eps in by_scene.values()
+        ]
+        all_results, scenes_done = resumable_prefix(prior, scene_keys)
+        if prior:
+            print(f"  Resuming: {len(all_results)} subtasks over "
+                  f"{scenes_done} complete scenes "
+                  f"({len(prior) - len(all_results)} rows discarded as "
+                  f"unverifiable)")
 
     for scene_id, scene_episodes in by_scene.items():
         scene_count += 1
-        expected = {(ep.episode_id, i)
-                    for ep in scene_episodes
-                    for i in range(len(ep.subtasks))}
-        if expected and expected <= done_keys:
+        if scene_count <= scenes_done:
             print(f"\n[{scene_count}/{len(by_scene)}] Skipping (already done): "
                   f"{scene_id.split('/')[-2]}")
             continue
-        if expected & done_keys:
-            # Partial scene: drop its rows and redo it whole, so every episode
-            # in the output was run with the memory history it should have had.
-            print(f"\n[{scene_count}/{len(by_scene)}] Partial, redoing scene")
-            all_results = [r for r in all_results
-                           if (r.episode_id, r.subtask_index) not in expected]
-            done_keys -= expected
 
         scene_path = _resolve_scene_path(scene_id, args.hm3d_root)
         print(f"\n[{scene_count}/{len(by_scene)}] Loading scene: {scene_path}")

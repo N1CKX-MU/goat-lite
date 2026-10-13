@@ -50,6 +50,47 @@ def load_results(output_dir: str) -> list[SubtaskResult]:
     return out
 
 
+def resumable_prefix(prior, scene_keys):
+    """How many leading scenes of a run the rows already on disk really cover.
+
+    Args:
+        prior: rows from load_results(), in the order they were written.
+        scene_keys: for each scene in run order, the list of
+            ``(episode_id, subtask_index)`` it is expected to produce.
+
+    Returns:
+        ``(rows_to_keep, n_scenes_done)`` -- the verified prefix of ``prior``
+        and how many scenes it accounts for. Resuming stops at the first
+        mismatch and everything from there is redone.
+
+    Matching is POSITIONAL, and that is the whole point.
+    ``(episode_id, subtask_index)`` is not unique across a run: GOAT-Bench
+    numbers episodes per scene, so over the 30-episode dev subset 218 subtasks
+    share only 86 distinct such pairs, and episode id "9" appears in five
+    different scenes. Keying resume on that pair -- which the first
+    implementation did -- lets a scene be skipped because an *earlier, unrelated*
+    scene happened to produce the same ids: it silently dropped scene 6 of 22
+    from a run, and would have dropped more as the covered set grew. Nothing
+    errors; the output is just quietly short.
+
+    The sequence, by contrast, is deterministic: the dev subset is sampled with
+    a fixed seed and scenes are visited in a fixed order, so the n-th row of
+    results.csv always belongs to the same subtask. save_results() is called
+    only after a scene completes, so the file always holds a whole number of
+    scenes.
+    """
+    rows_done, cursor = 0, 0
+    for keys in scene_keys:
+        chunk = prior[cursor:cursor + len(keys)]
+        if len(chunk) != len(keys):
+            break
+        if [(r.episode_id, r.subtask_index) for r in chunk] != list(keys):
+            break
+        cursor += len(keys)
+        rows_done += 1
+    return prior[:cursor], rows_done
+
+
 def save_results(
     results: list[SubtaskResult],
     output_dir: str,

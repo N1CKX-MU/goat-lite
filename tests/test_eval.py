@@ -301,3 +301,64 @@ class TestResumeRoundTrip:
         assert len(back) == 1
         assert back[0].detector_in_view is False   # default
         assert back[0].ever_matched is False
+
+
+class TestResumablePrefix:
+    """Resume used to key on (episode_id, subtask_index). GOAT-Bench numbers
+    episodes PER SCENE, so over the 30-episode dev subset 218 subtasks share
+    only 86 distinct such pairs and episode id "9" appears in five scenes. A
+    scene was therefore skipped because an unrelated earlier scene had produced
+    the same ids -- silently dropping scene 6 of 22 from a real run."""
+
+    def _row(self, episode_id, idx):
+        from src.eval.runner import SubtaskResult
+        return SubtaskResult(
+            episode_id=episode_id, subtask_index=idx, category="mirror",
+            modality="category", success=False, spl=0.0,
+            distance_to_goal=2.0, steps_taken=500, actual_path_length=1.0,
+            shortest_path_length=1.0, reason="timeout",
+        )
+
+    def test_counts_only_complete_leading_scenes(self):
+        from src.eval.report import resumable_prefix
+        scene_keys = [[("0", 0), ("0", 1)], [("1", 0)], [("2", 0), ("2", 1)]]
+        prior = [self._row("0", 0), self._row("0", 1), self._row("1", 0)]
+
+        kept, n = resumable_prefix(prior, scene_keys)
+        assert n == 2
+        assert len(kept) == 3
+
+    def test_colliding_episode_ids_do_not_over_skip(self):
+        """The regression. Scene 1 is episode "9" with 5 subtasks; scene 2 is a
+        DIFFERENT scene that also calls its episode "9" with 5 subtasks. With
+        only scene 1 on disk, exactly one scene is resumable."""
+        from src.eval.report import resumable_prefix
+        keys = [("9", i) for i in range(5)]
+        scene_keys = [list(keys), list(keys)]
+        prior = [self._row("9", i) for i in range(5)]
+
+        kept, n = resumable_prefix(prior, scene_keys)
+        assert n == 1, "a later scene sharing episode ids must still be run"
+        assert len(kept) == 5
+
+    def test_stops_at_the_first_mismatch(self):
+        from src.eval.report import resumable_prefix
+        scene_keys = [[("0", 0)], [("1", 0)], [("2", 0)]]
+        # Scene 2's row is missing, so scene 3's row cannot be trusted either.
+        prior = [self._row("0", 0), self._row("2", 0)]
+
+        kept, n = resumable_prefix(prior, scene_keys)
+        assert n == 1
+        assert len(kept) == 1
+
+    def test_short_final_scene_is_redone(self):
+        from src.eval.report import resumable_prefix
+        scene_keys = [[("0", 0), ("0", 1), ("0", 2)]]
+        prior = [self._row("0", 0), self._row("0", 1)]
+
+        kept, n = resumable_prefix(prior, scene_keys)
+        assert n == 0 and kept == []
+
+    def test_nothing_on_disk(self):
+        from src.eval.report import resumable_prefix
+        assert resumable_prefix([], [[("0", 0)]]) == ([], 0)
