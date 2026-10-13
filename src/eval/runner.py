@@ -11,7 +11,7 @@ import quaternion as qt
 
 from src.sim.env import HabitatEnv, GoalSpec, Observation
 from src.sim.goat_dataset import EpisodeSpec, SubtaskSpec, quaternion_from_coeffs
-from src.eval.metrics import subtask_success, compute_spl
+from src.eval.metrics import subtask_success, compute_spl, instance_in_view
 
 
 @dataclass
@@ -29,6 +29,11 @@ class SubtaskResult:
     shortest_path_length: float
     reason: str  # "success", "timeout", "wrong_stop", "no_plan"
     wall_time_s: float = 0.0
+    # Did the agent's own detector also fire on the goal class in the final
+    # frame? Not part of the success criterion -- success uses the benchmark's
+    # geometric visibility test -- but recorded so the stricter
+    # "navigated there AND recognised it" rate stays reportable.
+    detector_in_view: bool = False
 
 
 def _resolve_scene_path(scene_id: str, hm3d_root: str = "data/hm3d") -> str:
@@ -191,15 +196,10 @@ def run_episode(
         ])
 
         if goal_positions:
-            # Check if goal is in view by running perception on final frame
             final_obs = env._make_obs()
-            detections = agent.perception.process(final_obs, step=steps)
-            goal_in_view = any(
-                hasattr(d, 'cls_name') and d.cls_name == subtask.category
-                for d in detections
-            )
+            camera_pose = env.get_pose()
+            intrinsics = env.intrinsics
 
-            # Closest qualifying instance decides success.
             dists = [
                 float(np.sqrt(
                     (final_pos_3d[0] - p[0]) ** 2 + (final_pos_3d[2] - p[2]) ** 2
@@ -207,17 +207,37 @@ def run_episode(
                 for p in goal_positions
             ]
             dist_to_goal = min(dists)
-            nearest = goal_positions[int(np.argmin(dists))]
 
-            success = subtask_success(
-                agent_pos=final_pos_3d,
-                goal_pos=nearest,
-                goal_in_view=goal_in_view,
+            # ANY valid instance that is both inside the radius and visible
+            # satisfies the criterion. Testing only the nearest one fails a stop
+            # that has a second valid instance of the category squarely in frame
+            # at 0.9 m -- and the dev subset has a median of 4 instances of a
+            # goal category per scene.
+            success = False
+            goal_in_view = False
+            for pos, d in zip(goal_positions, dists):
+                visible = instance_in_view(
+                    np.asarray(pos), camera_pose, intrinsics, final_obs.depth
+                )
+                goal_in_view = goal_in_view or visible
+                if subtask_success(
+                    agent_pos=final_pos_3d, goal_pos=np.asarray(pos),
+                    goal_in_view=visible,
+                ):
+                    success = True
+                    break
+
+            # Reported alongside, never scored: does the agent's detector agree?
+            detections = agent.perception.process(final_obs, step=steps)
+            detector_in_view = any(
+                hasattr(d, 'cls_name') and d.cls_name == subtask.category
+                for d in detections
             )
         else:
             # Genuinely no ground truth for this subtask — cannot be scored.
             success = False
             goal_in_view = False
+            detector_in_view = False
             dist_to_goal = float("inf")
 
         spl = compute_spl(success, shortest_path, actual_path)
@@ -245,6 +265,7 @@ def run_episode(
             shortest_path_length=shortest_path,
             reason=reason,
             wall_time_s=wall_time,
+            detector_in_view=detector_in_view,
         ))
 
     return results
