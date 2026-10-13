@@ -456,17 +456,18 @@ All modules in the approved design are implemented, integrated and under test.
 | Detector (finetuned YOLOv8n) | Complete | Trained to 36 GOAT categories; §4.3 |
 | CLIP encoder, perception pipeline | Complete | fp16, L2-normalised embeddings |
 | Occupancy mapping, frontier detection | Complete | Log-odds with ray clearing; §4.4 |
-| Instance database | Complete | Three-gate merge; **no reset method** — §4.7 |
-| Goal matcher (3 modalities) | Complete | Language restricted to category; §4.4 |
+| Instance database | Complete | Three-gate merge, clearable, evidence-gated; §4.4 |
+| Goal matcher (3 modalities) | Complete | Language restricted to category; image matching outstanding (§4.5.3) |
 | Planning (A\*, FMM), pure pursuit | Complete | Validated against navmesh; §4.4 |
-| Agent state machine | Complete | Stop logic defective; §4.6 |
-| Evaluation runner, metrics | Complete | Per-scene checkpointing |
+| Agent state machine | Complete | Stop decision reworked; §4.4 |
+| Evaluation runner, metrics | Complete | Per-scene checkpointing; geometric visibility test (§4.5.1) |
 | Debug visualiser, demo tooling | Complete | §4.2 |
+| Failure-taxonomy tooling | Complete | Report tables generated from `results.csv` |
 
 The system runs within budget: peak GPU memory stays **under 3 GB** of the 4 GB
 available, and the most recent plumbing smoke test peaked at **590 MB**.
 
-**Testing.** **166 automated tests** pass. They use dependency-injected fakes —
+**Testing.** **200 automated tests** pass. They use dependency-injected fakes —
 a fake detector, a fake encoder returning deterministic normalised embeddings,
 synthetic observations — so the entire suite runs without a GPU, model downloads
 or scene files, in about 16 seconds.
@@ -591,16 +592,66 @@ believe its target was metres away.
   affected. The agent now plans to the nearest free cell within the success
   radius, which is what the success criterion actually asks for.
 
+**The stop decision (2026-10-13).** Three further defects, all in the eight
+lines of the state machine that decide whether to stop.
+
+- **VERIFYING drove forward** while the agent was already inside the success
+  radius, which is what pressed it nose-to-surface against the wall a mirror
+  hangs on and pushed the object out of frame.
+- **The 5-step verification budget was geometrically impossible.** One turn is
+  30°, so five steps cannot bring a goal more than 150° off-axis into frame: a
+  goal behind the agent was unconfirmable however long the subtask ran.
+- **Budget expiry was a livelock.** It reverted to APPROACHING while still
+  inside the radius, so the next tick re-entered VERIFYING with the counter
+  reset — measured at **32 of 40 ticks** on a synthetic arrival, which is the
+  500-step timeout observed on every traced subtask that reached its goal.
+
+Verification now turns the short way toward the matched node, closes to within
+0.8 of the success distance so the node's own position error cannot push the
+stop outside the radius, and commits. It no longer waits for a fresh detection,
+because §4.5.1 shows the detector is nearly blind at that range; the decision
+rests on accumulated memory instead, which was built at distances where the
+detector works. A node that cannot be brought into frame within a full 360°
+survey is rejected for the rest of the subtask, and rejections are passed to the
+matcher so the second-best instance can win.
+
+Two supporting changes: `InstanceDatabase` and `SemanticMap` gained `clear()`,
+so `reset(keep_memory=False)` stopped being a no-op and memory no longer leaks
+between episodes — which is what made the memory ablation possible at all — and
+the matcher now requires `n_observations ≥ 2`, or a single sighting above 0.5
+confidence, before an instance may be targeted.
+
+On the trace that motivated the work (episode 24, subtask 2):
+
+| | before | after |
+|---|---|---|
+| Outcome | timeout at 250 steps | **STOP at step 15** |
+| Closest approach | 0.19 m | 0.91 m |
+| Goal in view at stop | False | **True** |
+| Scored | failure | **SUCCESS** |
+
+The closest approach moving *outward* is the fix working: the agent no longer
+drives through its own viewing distance.
+
 **The pattern that matters.** Each fix moved the failure *forward* through the
 pipeline rather than sideways: detector vocabulary → map geometry → goal
-reachability → detector precision → the final stop decision. No stage regressed
-after being fixed and covered by tests.
+reachability → detector precision → the stop decision → and now the success
+criterion itself and the question of whether the goal is ever found at all. No
+stage regressed after being fixed and covered by tests.
 
 ### 4.5 Results III — The Detector-Limited Success Ceiling
 
-Since success requires the goal to be **in view** at the moment of stopping, and
-"in view" means the detector fires on it, the honest question is not "why is SR
-low" but "how many subtasks are winnable at all".
+Since success requires the goal to be **in view** at the moment of stopping, the
+honest question is not "why is SR low" but "how many subtasks are winnable at
+all".
+
+> **Correction (2026-10-13).** The figures in this section were computed while
+> "in view" was implemented as *the agent's own detector firing on the final
+> frame*. That is not the benchmark's criterion (§4.5.1), and the radii used
+> here include two that lie **outside** the success radius. The 59.2% below is
+> therefore an upper bound on "the detector can see this object from
+> somewhere", not on "from a pose that could score". The in-radius ceiling,
+> which is the number that actually bounds SR, is reported in §4.5.2.
 
 **Method.** For every ground-truth goal instance in the 30-episode development
 subset, the agent is parked at a ring of navigable poses facing the object — 8
@@ -642,6 +693,114 @@ say so rather than implying a clean correlation.
 2. **The ceiling does not excuse the result.** 59.2% being winnable means
    SR = 0% still reflects genuine navigation and stop-logic gaps. SR should be
    reported against the achievable subset as well as the raw total.
+
+#### 4.5.1 The criterion the agent was being held to was not the benchmark's
+
+§3.4 adopts GOAT-Bench's success criterion: STOP within 1.0 m of a valid
+instance, **and that instance within the agent's field of view**. Being within
+the field of view is a geometric property of the scene and the camera. The
+evaluation code decided it by running the agent's own YOLO on the final frame
+and looking for the goal class.
+
+That substitution is wrong on three counts. GOAT-Bench has no access to an
+agent's internals, so it cannot be the benchmark's definition — and the episode
+files ship 30 ground-truth `view_points` per goal, each with an IoU, which is
+how the benchmark does express visibility. It makes SR a function of detector
+recall twice over, once to find the goal and again to be credited with reaching
+it, which makes the number incomparable with published GOAT results. And it is
+very nearly unsatisfiable, for a reason that only became visible on measuring
+it.
+
+**Detection probability against viewing distance.** Probing one development
+episode's goals at five radii, 8 angles each, asking the detector directly
+whether it fires on the goal class while facing the instance:
+
+| Radius | 0.5 m | 0.8 m | 1.2 m | 1.5 m | 2.5 m |
+|---|---|---|---|---|---|
+| Detector fires | 7% | 9% | 20% | **34%** | 28% |
+
+Detection probability climbs steeply out to about 1.5 m. **Success requires a
+stop inside 1.0 m**, where the detector fires from roughly one pose in twelve:
+an object that fills the frame with untextured surface and no surrounding
+context does not resemble the room-scale viewpoints the detector was trained
+on. A geometrically perfect arrival was therefore rejected about nine times in
+ten.
+
+The scenes are not the obstacle. Over all 1,246 annotated `val_unseen` goals
+and their 26,714 ground-truth viewpoints, the median viewpoint sits **1.10 m**
+from its object and **90% of goals have at least one viewpoint inside 1.0 m**.
+The conflict is between the detector's working range and the criterion.
+
+Clause (b) is now `instance_in_view()`: project the ground-truth centroid into
+the camera, require it inside the image and in front of it, and test occlusion
+against the depth buffer. Depth rather than a semantic mask, because the local
+HM3D validation scenes ship no semantic assets — a stated limitation. Success
+is granted if **any** valid instance is both inside the radius and visible,
+since a category subtask accepts any instance of its class.
+
+The detector's answer is still recorded per subtask and aggregated as
+`sr_detector_agrees`. **Both are reported**: the benchmark's SR, and the
+stricter rate at which the agent also recognised what it had reached.
+
+#### 4.5.2 Two limits that are properties of the embodiment, not the policy
+
+Two further ceilings were measured, both geometric, both independent of how
+good the navigation policy becomes.
+
+**The in-radius detector ceiling.** The ceiling of §4.5 counts a subtask as
+winnable if the detector fires from *any* probe radius, including 1.5 m and
+2.5 m, which lie outside the success radius. The probe now measures each
+snapped pose's true distance and reports the in-radius figure separately. This
+is the number that bounds SR under the benchmark criterion.
+
+**Vertical framing.** The camera sits 1.41 m up, the sensor is square with a 90°
+horizontal FOV, so the vertical FOV is also 90°, and the action space has no
+pitch — only stop, forward and two turns. At horizontal distance *d* the camera
+sees heights `camera_y ± d`, so an instance whose centroid is *h* above or
+below the camera needs at least *h* of standoff before it enters frame at all.
+
+Over the 218 development subtasks, taking the easiest valid instance each:
+
+| Minimum standoff for the centroid to be in frame | |
+|---|---|
+| p50 | 0.27 m |
+| p75 | 0.56 m |
+| p95 | 1.42 m |
+
+**31 of 218 subtasks (14.2%) need more standoff than the 1.0 m success radius
+allows** — the goal cannot be framed from anywhere a scoring stop could happen.
+It is even across modalities (category 12.3%, language 15.7%, image 14.9%) and
+concentrated in two categories: **every one of the 20 `rug` subtasks**, and 7 of
+9 `carpet` subtasks. A rug's centroid lies on the floor 1.41 m below the camera,
+and the downward 45° ray only reaches the floor at 1.41 m out.
+
+This cuts both ways and the report should say so. It is partly a limitation of
+`instance_in_view()`, which projects the **centroid** — the right test for a
+compact object and too strict for an extended one, where part of the object can
+be in frame while its centroid is not. The principled fix is the dataset's own
+`view_points`, which encode visibility per pose with an IoU and need no object
+extents. That change would *raise* SR, so retaining the stricter test keeps the
+reported figure conservative; the affected 14.2% is named here rather than left
+inside the detector's share of the blame.
+
+#### 4.5.3 Instance ambiguity in the single-instance modalities
+
+A language or image subtask targets **one** referenced instance, and only that
+instance is credited. Over the development subset:
+
+| Modality | n | Median instances of the goal category in the scene | With >1 |
+|---|---|---|---|
+| Category | 81 | 4 | 58 (72%) |
+| Language | 70 | 2 | 47 (67%) |
+| Image | 67 | 2 (max 47) | 41 (61%) |
+
+The matcher routes image goals through category matching — the *nearest*
+instance of the class — and never uses the goal image's pixels. The expected
+chance that the nearest instance is the referenced one is **0.58 for image** and
+0.49 for language. Image is 67 of 218 development subtasks, so this alone caps
+image SR near 25% before any other limit applies. Implementing true image-goal
+matching is therefore reclassified from an optional extension to required work
+(§4.9).
 
 ### 4.6 Results IV — End-to-End Status
 
@@ -691,24 +850,36 @@ a single low-confidence detection is as targetable as one seen fifty times.
 
 ### 4.7 Known Limitations
 
-1. **The stop decision does not orient toward the goal** (§4.6). The identified
-   fix is a bearing check on arrival: turn toward the matched node until it is in
-   frame, then decide.
-2. **Instance memory has no evidence threshold.** A node observed once at
-   confidence 0.15 can become a navigation target. The candidate fix mirrors the
-   occupancy grid's log-odds scheme: require repeated observations, or an
-   aggregate confidence, before a node is targetable.
-3. **Memory is not cleared between episodes.** `InstanceDatabase` has no reset
-   method, so `reset(keep_memory=False)` is currently a no-op, and the agent is
-   constructed once per scene. Memory and map therefore leak across episodes
-   within a scene. This confounds the lifelong curve and makes the memory on/off
-   ablation — the key experiment of §3.5 — unimplementable until fixed.
-4. **The detector is undertrained** (epoch 39 of 60), and its ceiling caps the
-   whole system at 59.2%.
-5. **No full evaluation has been run.** Results to date come from smoke tests
-   and traces, not from the 30-episode development evaluation.
-6. **Scale of evidence.** Conclusions currently rest on tens of subtasks, not
-   hundreds. They should be treated as diagnostic, not statistical.
+The first three limitations of the previous revision — no orientation on
+arrival, no evidence threshold in memory, and memory that could not be cleared —
+have been addressed and are reported in §4.4. What remains:
+
+1. **Visibility is tested on the object's centroid.** `instance_in_view()`
+   projects the ground-truth centroid, which is correct for a compact object and
+   too strict for an extended one: part of a rug, carpet or bed can be in frame
+   while its centroid is not. This costs 14.2% of development subtasks (§4.5.2).
+   The principled fix is the dataset's own `view_points` with their per-pose IoU.
+   Since that change would *raise* SR, the stricter test is retained and the
+   affected share is named rather than absorbed into the detector's blame.
+2. **Occlusion is tested against depth, not semantics.** The local HM3D
+   validation scenes ship no semantic assets, so the test allows the nearest
+   visible surface to sit up to `max(0.5·range, range − 1 m)` in front of the
+   centroid. Downloading `hm3d-val-semantic-annots` would permit the faithful
+   semantic-mask test.
+3. **Image goals do not use the goal image.** They are localised by category, so
+   the referenced instance is selected with probability ≈ 0.58 (§4.5.3). This is
+   required work, not an optional extension.
+4. **No pitch action.** The agent cannot look up or down, which is what makes
+   the vertical framing limit of §4.5.2 binding rather than merely inconvenient.
+5. **The detector is undertrained** (epoch 39 of 60, learning rate never
+   annealed), and its in-radius ceiling caps the whole system.
+6. **The evidence gate is set, not swept.** `min_observations = 2` and
+   `trust_confidence = 0.5` are reasoned from the probe's confidence range but
+   the values are not yet measured; {1, 2, 3} is planned on the development
+   subset.
+7. **Scale of evidence.** The development evaluation is 218 subtasks over 22
+   scenes. Per-category conclusions rest on single-digit counts and should be
+   read as diagnostic.
 
 ### 4.8 Comparison with the Reference Work
 
@@ -728,17 +899,25 @@ The intended comparison is therefore not "our SR versus theirs" but:
 
 ### 4.9 Immediate Next Steps
 
-1. **Bearing check on arrival** — turn toward the matched node before deciding,
-   in place of blind forward motion inside the success radius (§4.6).
-2. **Evidence-gated memory** — require repeated observation before a node
-   becomes targetable (§4.7.2).
-3. **Add `clear()` to the instance database and map**, and honour
-   `keep_memory=False`, unblocking the memory ablation (§4.7.3).
-4. **Run the full 30-episode development evaluation** and populate the results
-   tables. All 36 `val_unseen` scenes now resolve locally, so this is no longer
-   blocked on data.
-5. **Complete detector training** to epoch 60 and re-measure both mAP and the
+Items 1–3 of the previous revision — the bearing check, the evidence gate and
+`clear()` — are done (§4.4), and the development evaluation is running. What
+follows, in order of expected value:
+
+1. **Image-goal matching** (§4.5.3). Render the goal pose, crop it with the
+   detector so the goal embedding comes from the same distribution as the
+   stored node embeddings, and match image-to-image within the goal category.
+   67 of 218 development subtasks are currently near chance.
+2. **Memory on/off ablation**, now that memory can be switched off — the key
+   experiment of §3.5, running on identical episodes.
+3. **Sweep `min_observations` ∈ {1, 2, 3}** and the commit distance, both of
+   which are currently reasoned rather than measured.
+4. **Re-measure the ceiling in-radius** and report SR against the achievable
+   subset as well as the raw total.
+5. **Complete detector training** to epoch 60 and re-measure mAP and the
    ceiling.
+6. **Semantic assets for the validation split**, which would replace the
+   depth-based occlusion proxy and the centroid test with the faithful
+   visibility criterion.
 
 ---
 
