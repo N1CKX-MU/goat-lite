@@ -875,6 +875,40 @@ Choose one stretch feature if the schedule allows. In priority order:
 
 **Stretch A: Image goals (third modality).** Add `modality == "image"` to `GoalMatcher`. Encode goal image with CLIP image encoder, cosine-sim vs stored instance embeddings. Easy — mostly a matcher change. Re-run dev eval with all three modalities. ~2 days.
 
+> **Note 2026-10-13 — promoted from stretch to required.** This is not optional
+> polish; image subtasks are currently near-chance by construction. The matcher
+> routes `image` through `_match_category`, i.e. the *nearest* instance of the
+> category, while the scorer credits only the **one** referenced instance. The
+> goal image's pixels are never used.
+>
+> Measured over the 30-episode dev subset, instances of the goal category
+> present in the scene:
+>
+> | modality | n | median instances | with >1 instance |
+> |---|---|---|---|
+> | category | 81 | 4 | 58 (72%) |
+> | language | 70 | 2 | 47 (67%) |
+> | image | 67 | 2 (max 47) | 41 (61%) |
+>
+> Expected chance that "nearest of class" is the right instance: **0.58 for
+> image**, 0.49 for language. With the image modality's in-radius detector
+> ceiling on top of that, image SR is capped near 25% however good navigation
+> becomes — and image is 67 of 218 dev subtasks.
+>
+> Design, so it is not re-derived later. `ClipEncoder.encode_image()` already
+> exists. Each goal carries ~59 `image_goals`, each an agent pose plus `hfov`
+> (76) and `image_dimensions` (512), so the goal view must be **rendered**:
+> save the agent state, set the given pose, grab RGB, restore. Our sensor is
+> 90°, so a centre crop of tan(38°)/tan(45°) = 0.781 approximates the 76° frame.
+>
+> Then make the goal embedding come from the **same distribution** as the node
+> embeddings: node embeddings are CLIP over *detector crops*, so run the
+> detector on the rendered goal view, crop its highest-confidence box of the
+> goal category, and encode that. If the detector does not fire on the goal
+> image, fall back to nearest-of-category, which is today's behaviour. Match by
+> image-image cosine similarity within the goal category, with an
+> `image_threshold` to be measured rather than guessed.
+
 **Stretch B: LightGlue for image-image verification.** In VERIFYING state, use LightGlue to keypoint-match the goal image against the current view for a stronger success signal. Improves image-goal accuracy. ~3 days.
 
 **Stretch C: Open-vocab detection swap.** Replace YOLOv8n with YOLO-World-S. Re-run key benchmarks and add an ablation row. Only if VRAM budget was underutilized in earlier smoke tests. ~2 days.
@@ -915,6 +949,36 @@ Finish full report. Circulate to guide for feedback.
 - Wall-clock time per subtask (median, 95th percentile)
 
 **What is "success"?** GOAT-Bench's own definition: agent called STOP action, and at STOP time (a) the agent is within 1.0 m euclidean of the correct instance's ground-truth position, and (b) the correct instance is within the agent's current field of view. We do not reinvent this definition.
+
+> **Note 2026-10-13 — how clause (b) is implemented.** The definition above is
+> unchanged; what changed is the code behind it. `runner.py` used to decide
+> "within the field of view" by running the *agent's own YOLO* on the final
+> frame and looking for the goal class. That is not this definition: being in
+> the field of view is a geometric property of the scene and the camera, and
+> GOAT-Bench has no access to the agent's internals (the episode files carry 30
+> ground-truth `view_points` per goal, which is how the benchmark expresses
+> visibility). Using the detector made SR a function of detector recall twice
+> over and incomparable with published numbers.
+>
+> It was also unsatisfiable. Probed at five radii, the detector fires on the
+> goal class from 7% of poses at 0.5 m, 9% at 0.8 m, 20% at 1.2 m, 34% at 1.5 m
+> and 28% at 2.5 m, while success *requires* a stop inside 1.0 m — so a
+> geometrically correct arrival was rejected about nine times in ten. The scenes
+> are not the obstacle: over all 1246 annotated `val_unseen` goals, the median
+> ground-truth viewpoint sits 1.10 m from its object and 90% of goals have a
+> viewpoint inside 1.0 m.
+>
+> Clause (b) is now `instance_in_view()` in `src/eval/metrics.py`: project the
+> ground-truth centroid into the camera, require it inside the image and in
+> front, and test occlusion against the depth buffer (depth rather than a
+> semantic mask, because the local HM3D val scenes ship no semantic assets —
+> a stated limitation). Success is granted if **any** valid instance is both
+> inside the radius and visible, since a category subtask accepts any instance.
+>
+> The detector-based answer is still recorded per subtask as `detector_in_view`
+> and aggregated as `sr_detector_agrees`. **Report both**: the benchmark's SR,
+> and the stricter rate where the agent also recognised what it had reached.
+> Engineering log 6.35–6.36 has the measurements.
 
 **Reporting the memory ablation.** Report memory-on and memory-off numbers side-by-side on the same episode set. Report the lifelong curve for memory-on. Interpret honestly — if goal-5 SR is not higher than goal-1 SR, say so.
 
