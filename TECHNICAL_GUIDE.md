@@ -2689,3 +2689,62 @@ on the extra key. Results are checkpointed after every scene, so this would
 have surfaced one scene into a three-hour run, with nothing saved. The header
 now comes from `dataclasses.fields()`, and a round-trip test asserts every
 field of the dataclass reaches the CSV.
+
+#### 6.42 The camera cannot frame 14% of goals from inside the success radius
+
+Purely geometric, measured over the 218 dev-subset subtasks with ground truth.
+The camera sits 1.41 m up, the sensor is square with a 90 degree horizontal
+FOV, so `fy == fx` and the **vertical** FOV is also 90 degrees: at a horizontal
+distance `d` the camera sees heights `camera_y ± d`. An instance whose centroid
+is `h` above or below the camera therefore needs at least `|h|` of standoff
+before it enters the frame at all. There is no look-up or look-down action --
+the action space is stop / forward / turn / turn -- so pitch cannot help.
+
+Taking the easiest valid instance per subtask, and the episode start height as
+the floor:
+
+| minimum standoff for the centroid to be in frame | |
+|---|---|
+| p25 | 0.06 m |
+| p50 | 0.27 m |
+| p75 | 0.56 m |
+| p90 | 1.39 m |
+| p95 | 1.42 m |
+
+**31 of 218 subtasks (14.2%) need more standoff than the 1.0 m success radius
+allows**, i.e. the goal centroid cannot be framed from anywhere a scoring stop
+could happen. It is even across modalities (category 12.3%, language 15.7%,
+image 14.9%) and concentrated in two categories:
+
+| category | affected | median standoff needed |
+|---|---|---|
+| rug | **20/20** | 1.42 m |
+| carpet | 7/9 | 1.37 m |
+| dresser | 4/8 | 0.98 m |
+
+Every rug subtask in the subset. A rug's centroid lies on the floor, 1.41 m
+below the camera, and the downward 45 degree ray only reaches the floor at
+1.41 m out -- so from 0.9 m away the rug's centroid is below the bottom of the
+image.
+
+**Two consequences, in opposite directions.**
+
+1. `instance_in_view()` is too strict for extended objects. It projects the
+   **centroid**, which is the right test for a compact object and the wrong one
+   for a rug, a carpet or a bed, where part of the object can be in frame while
+   its centroid is not. The honest fix is the dataset's own `view_points`,
+   which encode visibility with an IoU per pose and need no object extents.
+   That change would *raise* SR, so leaving the stricter test in place keeps
+   the reported number conservative -- but it must be stated as a limitation,
+   and the affected 14.2% named, rather than quietly absorbed into the
+   detector's share of the blame. (For rug and carpet specifically it is
+   probably moot: an unlit floor texture filling the frame at 0.9 m is unlikely
+   to clear the detector either, which 6.35 would predict.)
+
+2. **The agent is standing in the wrong place, and `_approach_cell` is why.**
+   It picks the known-free cell *closest* to the object, which actively
+   minimises standoff -- exactly the wrong direction. 31.7% of subtasks need
+   more than 0.5 m of standoff for vertical framing, and 6.35 showed the
+   detector is nearly blind below 0.8 m as well. Both argue for approaching a
+   pose near the **outer** edge of the success radius rather than the inner.
+   That is the next agent change, and it is now quantified rather than guessed.
