@@ -9,7 +9,8 @@ import numpy as np
 
 from src.sim.env import Observation
 from src.planning.astar import plan_astar
-from src.planning.exploration import choose_frontier
+from src.planning.fmm import plan_fmm
+from src.planning.exploration import FRONTIER_STRATEGIES, choose_frontier
 from src.mapping.frontier import find_frontiers
 from src.agent.action import bearing_error, path_to_action
 
@@ -20,6 +21,34 @@ SEARCH_GIVEUP_TURNS = 12
 # When a matched node is unreachable, try a few replans/turns before falling
 # back to exploration rather than stopping (a stop counts as failure).
 APPROACH_GIVEUP_TURNS = 4
+
+
+PLANNERS = {"astar": plan_astar, "fmm": plan_fmm}
+
+
+def resolve_planner(name: str):
+    """Look up a planner by name, refusing anything that cannot actually plan.
+
+    PLAN.md Section 7.10 compares A* against Fast Marching. The comparison has
+    one trap: `plan_fmm` returns None when skfmm is not importable, which an
+    agent cannot distinguish from "no path exists". Every subtask would end in
+    `no_plan` and the arm would read as a planner result rather than a missing
+    dependency -- the silent-inactivity failure of engineering log 6.46. So the
+    import is checked here, once, at build time.
+    """
+    if name not in PLANNERS:
+        raise ValueError(
+            f"unknown planner {name!r}; expected one of {sorted(PLANNERS)}")
+    if name == "fmm":
+        try:
+            import skfmm  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError(
+                "planner 'fmm' needs skfmm, which is not importable "
+                f"({e}). plan_fmm would silently return None for every plan, "
+                "so this arm would measure a missing dependency, not FMM."
+            ) from e
+    return PLANNERS[name]
 # Waypoint distance ahead of the agent along the path, in grid cells. One
 # forward action covers 0.25 m = 5 cells at the default 0.05 m resolution, so
 # the aim point must be at least that far or every step overshoots it.
@@ -82,6 +111,9 @@ class GoatAgent:
         commit_distance_frac: float = COMMIT_DISTANCE_FRAC,
         verify_facing_tol: float = VERIFY_FACING_TOL,
         verify_giveup_steps: int = VERIFY_GIVEUP_STEPS,
+        planner: str = "astar",
+        frontier_strategy: str = "nearest-largest",
+        frontier_seed: int = 42,
     ):
         self.perception = perception
         self.memory = memory
@@ -95,6 +127,16 @@ class GoatAgent:
         self.commit_distance_frac = commit_distance_frac
         self.verify_facing_tol = verify_facing_tol
         self.verify_giveup_steps = verify_giveup_steps
+        # Section 7.10's planner and exploration axes. Resolved once, here, so
+        # an unrunnable choice fails at build time rather than per step.
+        self.planner_name = planner
+        self._plan = resolve_planner(planner)
+        self.frontier_strategy = frontier_strategy
+        self._frontier_rng = np.random.default_rng(frontier_seed)
+        if frontier_strategy not in FRONTIER_STRATEGIES:
+            raise ValueError(
+                f"unknown frontier strategy {frontier_strategy!r}; "
+                f"expected one of {list(FRONTIER_STRATEGIES)}")
 
         self.state = AgentState.SEARCHING
         self.step_count = 0
@@ -228,7 +270,7 @@ class GoatAgent:
         if self._needs_replan():
             occ = self.semantic_map.get_occupancy()
             goal_ij = self._approach_cell(occ, agent_ij, target_ij)
-            self._set_path(plan_astar(occ, agent_ij, goal_ij))
+            self._set_path(self._plan(occ, agent_ij, goal_ij))
 
             if self._current_path is None:
                 self._no_plan_count += 1
@@ -268,7 +310,9 @@ class GoatAgent:
         # Need a new frontier target?
         if self._needs_replan():
             frontiers = find_frontiers(occ, explored)
-            target = choose_frontier(frontiers, agent_ij, self._visited_frontiers)
+            target = choose_frontier(frontiers, agent_ij, self._visited_frontiers,
+                                     strategy=self.frontier_strategy,
+                                     rng=self._frontier_rng)
 
             if target is None:
                 self._no_plan_count += 1
@@ -277,7 +321,7 @@ class GoatAgent:
                     return 0
                 return 2  # spin to survey for frontiers
 
-            self._set_path(plan_astar(occ, agent_ij, target.centroid_ij))
+            self._set_path(self._plan(occ, agent_ij, target.centroid_ij))
 
             if self._current_path is None:
                 self._visited_frontiers.add(target.centroid_ij)

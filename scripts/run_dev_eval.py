@@ -21,12 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.sim.env import HabitatEnv
 from src.sim.goat_dataset import load_val_unseen, sample_dev_subset
 from src.perception.detector import YOLODetector
-from src.perception.encoder import ClipEncoder
+from src.perception.encoder import ClipEncoder, validate_encoder
 from src.perception.pipeline import PerceptionPipeline
 from src.mapping.occupancy import SemanticMap, map_extent_for_scene
 from src.memory.instance_db import InstanceDatabase
 from src.matching.goal_matcher import GoalMatcher
 from src.agent.goat_agent import GoatAgent
+from src.planning.exploration import FRONTIER_STRATEGIES
 from src.eval.runner import run_episode, _resolve_scene_path
 from src.eval.report import save_results, load_results, resumable_prefix
 
@@ -43,6 +44,10 @@ def build_agent(
     merge_embed_sim: float = 0.85,
     success_distance: float = 1.0,
     commit_distance_frac: float = None,
+    planner: str = "astar",
+    frontier_strategy: str = "nearest-largest",
+    encoder_model: str = "ViT-B-32",
+    encoder_pretrained: str = "laion2b_s34b_b79k",
 ) -> GoatAgent:
     """Build the full agent with all subsystems.
 
@@ -59,7 +64,9 @@ def build_agent(
     the effective configuration at eval time.
     """
     detector = YOLODetector(device=device)
-    encoder = ClipEncoder(device=device)
+    validate_encoder(encoder_model, encoder_pretrained)
+    encoder = ClipEncoder(model_name=encoder_model,
+                          pretrained=encoder_pretrained, device=device)
     perception = PerceptionPipeline(detector, encoder, intrinsics)
     memory = InstanceDatabase(merge_dist_m=merge_dist_m,
                              merge_embed_sim=merge_embed_sim)
@@ -90,6 +97,8 @@ def build_agent(
         intrinsics=intrinsics,
         max_steps=500,
         success_distance=success_distance,
+        planner=planner,
+        frontier_strategy=frontier_strategy,
         **kwargs,
     )
 
@@ -122,6 +131,18 @@ def main():
     parser.add_argument("--commit-distance-frac", type=float, default=None,
                         help="fraction of the success distance at which the "
                              "agent commits to a stop (default: the code's 0.8)")
+    parser.add_argument("--planner", type=str, default="astar",
+                        choices=["astar", "fmm"],
+                        help="PLAN 7.10 planner axis")
+    parser.add_argument("--frontier-strategy", type=str,
+                        default="nearest-largest",
+                        choices=list(FRONTIER_STRATEGIES),
+                        help="PLAN 7.10 exploration axis")
+    parser.add_argument("--encoder-model", type=str, default="ViT-B-32",
+                        help="open_clip architecture; validated before any "
+                             "scene loads")
+    parser.add_argument("--encoder-pretrained", type=str,
+                        default="laion2b_s34b_b79k")
     parser.add_argument("--no-memory", action="store_true",
                         help="memory-off arm of the ablation: clear instance "
                              "memory and the map before every subtask instead "
@@ -207,6 +228,10 @@ def main():
             merge_embed_sim=args.merge_embed_sim,
             success_distance=args.success_distance,
             commit_distance_frac=args.commit_distance_frac,
+            planner=args.planner,
+            frontier_strategy=args.frontier_strategy,
+            encoder_model=args.encoder_model,
+            encoder_pretrained=args.encoder_pretrained,
         )
 
         for ep in scene_episodes:
