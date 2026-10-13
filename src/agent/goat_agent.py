@@ -79,6 +79,9 @@ class GoatAgent:
         intrinsics: np.ndarray,
         max_steps: int = 500,
         success_distance: float = 1.0,
+        commit_distance_frac: float = COMMIT_DISTANCE_FRAC,
+        verify_facing_tol: float = VERIFY_FACING_TOL,
+        verify_giveup_steps: int = VERIFY_GIVEUP_STEPS,
     ):
         self.perception = perception
         self.memory = memory
@@ -87,6 +90,11 @@ class GoatAgent:
         self.intrinsics = intrinsics
         self.max_steps = max_steps
         self.success_distance = success_distance
+        # Module constants are the defaults; as instance attributes they become
+        # sweep axes (PLAN.md Section 7.10) without editing source.
+        self.commit_distance_frac = commit_distance_frac
+        self.verify_facing_tol = verify_facing_tol
+        self.verify_giveup_steps = verify_giveup_steps
 
         self.state = AgentState.SEARCHING
         self.step_count = 0
@@ -354,9 +362,9 @@ class GoatAgent:
             float(obs.compass),
             self._matched_node.world_xyz[[0, 2]],
         )
-        if abs(err) <= VERIFY_FACING_TOL:
+        if abs(err) <= self.verify_facing_tol:
             dist = self._distance_to_node(obs, self._matched_node)
-            if dist > COMMIT_DISTANCE_FRAC * self.success_distance:
+            if dist > self.commit_distance_frac * self.success_distance:
                 # Aligned but still on the edge of the radius. Close in, so the
                 # node's own position error cannot push the stop outside it.
                 # Forward is only safe here *because* it is bounded: it stops
@@ -366,7 +374,7 @@ class GoatAgent:
             # had its say on this very frame at the top of the tick.
             self.state = AgentState.DONE
             return 0
-        if self._verify_steps < VERIFY_GIVEUP_STEPS:
+        if self._verify_steps < self.verify_giveup_steps:
             return 2 if err > 0 else 3
         # A full survey and the node never came into frame -- its estimated
         # position is not where the agent can look. Drop it and move on rather

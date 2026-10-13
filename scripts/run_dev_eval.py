@@ -37,6 +37,12 @@ def build_agent(
     camera_height: float = 1.41,
     scene_bounds: tuple = None,
     min_observations: int = 2,
+    language_threshold: float = 0.24,
+    image_threshold: float = -1.0,
+    merge_dist_m: float = 0.75,
+    merge_embed_sim: float = 0.85,
+    success_distance: float = 1.0,
+    commit_distance_frac: float = None,
 ) -> GoatAgent:
     """Build the full agent with all subsystems.
 
@@ -55,8 +61,14 @@ def build_agent(
     detector = YOLODetector(device=device)
     encoder = ClipEncoder(device=device)
     perception = PerceptionPipeline(detector, encoder, intrinsics)
-    memory = InstanceDatabase()
-    matcher = GoalMatcher(encoder, min_observations=min_observations)
+    memory = InstanceDatabase(merge_dist_m=merge_dist_m,
+                             merge_embed_sim=merge_embed_sim)
+    matcher = GoalMatcher(
+        encoder,
+        min_observations=min_observations,
+        language_threshold=language_threshold,
+        image_threshold=image_threshold,
+    )
     # camera_height lets the map derive the floor from the camera pose instead
     # of assuming floor Y == 0, which no HM3D scene satisfies.
     if scene_bounds is not None:
@@ -67,6 +79,9 @@ def build_agent(
     else:
         semantic_map = SemanticMap(camera_height=camera_height)
 
+    kwargs = {}
+    if commit_distance_frac is not None:
+        kwargs["commit_distance_frac"] = commit_distance_frac
     return GoatAgent(
         perception=perception,
         memory=memory,
@@ -74,7 +89,8 @@ def build_agent(
         semantic_map=semantic_map,
         intrinsics=intrinsics,
         max_steps=500,
-        success_distance=1.0,
+        success_distance=success_distance,
+        **kwargs,
     )
 
 
@@ -96,6 +112,16 @@ def main():
     parser.add_argument("--min-observations", type=int, default=2,
                         help="times an instance must be seen before the "
                              "matcher will target it (1 disables the gate)")
+    # Sweep axes (PLAN.md Section 7.10). Defaults mirror the code, so omitting
+    # them all reproduces the configuration in configs/agent_default.yaml.
+    parser.add_argument("--language-threshold", type=float, default=0.24)
+    parser.add_argument("--image-threshold", type=float, default=-1.0)
+    parser.add_argument("--merge-dist", type=float, default=0.75)
+    parser.add_argument("--merge-embed-sim", type=float, default=0.85)
+    parser.add_argument("--success-distance", type=float, default=1.0)
+    parser.add_argument("--commit-distance-frac", type=float, default=None,
+                        help="fraction of the success distance at which the "
+                             "agent commits to a stop (default: the code's 0.8)")
     parser.add_argument("--no-memory", action="store_true",
                         help="memory-off arm of the ablation: clear instance "
                              "memory and the map before every subtask instead "
@@ -175,6 +201,12 @@ def main():
         agent = build_agent(
             intrinsics, device=args.device, scene_bounds=env.get_scene_bounds(),
             min_observations=args.min_observations,
+            language_threshold=args.language_threshold,
+            image_threshold=args.image_threshold,
+            merge_dist_m=args.merge_dist,
+            merge_embed_sim=args.merge_embed_sim,
+            success_distance=args.success_distance,
+            commit_distance_frac=args.commit_distance_frac,
         )
 
         for ep in scene_episodes:
