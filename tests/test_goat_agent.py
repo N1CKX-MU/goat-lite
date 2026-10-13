@@ -333,6 +333,24 @@ class TestVerification:
         assert action == 0
         assert agent.state == AgentState.DONE
 
+    def test_closes_in_before_committing(self):
+        """Stopping the instant the node enters the success radius leaves no
+        margin for the node's own position error. Measured on the dev eval: two
+        subtasks stopped 1.02 m from the true instance -- failures by 2 cm --
+        because VERIFYING triggers at `dist <= success_distance` and the agent
+        committed right on the boundary."""
+        # Node 0.95 m dead ahead: inside the radius, outside the commit band.
+        agent, _, _ = _verify_setup((0.0, 0.5, -0.95))
+        action = agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert action == 1, "should close in while still near the boundary"
+        assert agent.state == AgentState.VERIFYING
+
+    def test_does_not_close_in_before_facing_the_goal(self):
+        """Forward only once aligned, or it is the nose-to-wall bug again."""
+        agent, _, _ = _verify_setup((0.0, 0.5, 0.95))  # 0.95 m BEHIND
+        action = agent.act(_make_obs(gps=(0.0, 0.0), heading=0.0))
+        assert action in (2, 3)
+
     def test_commits_once_it_faces_the_goal(self):
         """Inside the success radius and facing its matched instance, the agent
         must decide. Waiting for a fresh detection instead is the defect: the

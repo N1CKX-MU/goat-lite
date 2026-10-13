@@ -42,6 +42,15 @@ VERIFY_GIVEUP_STEPS = 12
 # FOV is 90° (so 45° either side) and one turn is 30°, which leaves margin for
 # the object's own extent at the edge of the image.
 VERIFY_FACING_TOL = math.radians(30.0)
+# Commit to a stop only once the matched node is this fraction of the success
+# distance away, closing in first if necessary. Two measurements bracket it.
+# Stopping at the boundary leaves no margin for the node's own position error:
+# two dev-eval subtasks stopped 1.02 m from the true instance, failures by 2 cm.
+# Going nearer than this is also wrong -- the detector fires from only 9% of
+# poses at 0.8 m against 34% at 1.5 m (6.35), and 31.7% of dev subtasks need
+# more than 0.5 m of standoff before the goal's centroid is even inside the
+# vertical FOV (6.42). 0.8 keeps ~0.2 m of slack at both ends. Sweep axis.
+COMMIT_DISTANCE_FRAC = 0.8
 
 
 class AgentState(enum.Enum):
@@ -346,7 +355,14 @@ class GoatAgent:
             self._matched_node.world_xyz[[0, 2]],
         )
         if abs(err) <= VERIFY_FACING_TOL:
-            # Inside the radius, looking at it, and the detector has already
+            dist = self._distance_to_node(obs, self._matched_node)
+            if dist > COMMIT_DISTANCE_FRAC * self.success_distance:
+                # Aligned but still on the edge of the radius. Close in, so the
+                # node's own position error cannot push the stop outside it.
+                # Forward is only safe here *because* it is bounded: it stops
+                # at the commit band and never drives the agent onto the object.
+                return 1
+            # Looking at it, comfortably inside, and the detector has already
             # had its say on this very frame at the top of the tick.
             self.state = AgentState.DONE
             return 0
