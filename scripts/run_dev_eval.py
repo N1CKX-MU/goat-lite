@@ -30,6 +30,7 @@ from src.agent.goat_agent import GoatAgent
 from src.planning.exploration import FRONTIER_STRATEGIES
 from src.eval.runner import run_episode, _resolve_scene_path
 from src.eval.report import save_results, load_results, resumable_prefix
+from src.eval.episode_order import group_by_scene
 
 
 def build_agent(
@@ -178,9 +179,7 @@ def main():
     print(f"  {label}: {len(dev_episodes)} episodes, {total_subtasks} subtasks")
 
     # Group episodes by scene for efficiency (avoid reloading scenes)
-    by_scene: dict[str, list] = {}
-    for ep in dev_episodes:
-        by_scene.setdefault(ep.scene_id, []).append(ep)
+    by_scene = group_by_scene(dev_episodes)
     print(f"  Scenes to load: {len(by_scene)}")
 
     all_results = []

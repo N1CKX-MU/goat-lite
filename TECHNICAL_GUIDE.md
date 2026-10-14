@@ -3822,3 +3822,56 @@ The practical consequences:
   that can resolve a success-rate claim**, at >99% power for 5 points. That is
   an argument for spending it on the best configuration available rather than
   the earliest one that looks finished.
+
+#### 6.65 Three bugs in a demo renderer whose render path had never been run
+
+`make_video.py` was committed with tests and a clean `--dry-run`. The tests
+covered clip *selection*; the rendering half had never been executed once.
+The first time it ran it filmed the agent failing a subtask the results
+recorded as a success. Three independent defects, found in this order:
+
+**1. The replay ran at a different sensor resolution.** `debug_episode.py` had
+no `--resolution`, so it replayed at the 256 default while the clips had been
+selected from a 512 px run. By 6.60 that alone changes outcomes. Fixed by
+threading the resolution from `make_video` through to the replay.
+
+**2. `--episode N` meant a different episode in each script.** The decisive
+one. The runner groups episodes by scene — one habitat load serves all of a
+scene's episodes — so `results.csv` is in scene-grouped order, and
+`make_video` computes its clip indices from `results.csv`. `debug_episode`
+indexed the *dev subset* order instead. The two are unrelated permutations:
+
+    eval-order  1  ->  dev-subset index 27
+    eval-order  4  ->  dev-subset index 21
+    eval-order 21  ->  dev-subset index 14
+
+A clip chosen as a 51-step `image/plant` success rendered as a
+`category/carpet` failure. **Every clip the pipeline could ever have produced
+was a different episode from the one it named.** The symptom was printed on
+screen the whole time — `tracing subtask 2: category/carpet` when the clip
+said `image/plant` — and was read past twice while two other hypotheses were
+tested.
+
+Fixed by giving the ordering one definition, `src/eval/episode_order.py`,
+imported by the runner and the replayer, with a test that fails if either
+stops using it. Two open-coded groupings were what allowed them to drift.
+
+**3. Image goals replayed with no embedding.** An image goal's embedding is
+not in the episode JSON; `runner.py` computes it by rendering the goal
+viewpoint (`_embed_image_goal`). `debug_episode` never called it, so every
+image subtask replayed with `goal_embedding = None`, the matcher had nothing
+to compare against, and the agent wandered — closest to the goal at step 0 and
+moving away thereafter. Fixed by building the goal spec through one helper
+that mirrors the runner, used for the filmed subtask *and* for every warmed-up
+subtask, since warmup rebuilds the memory the filmed subtask inherits.
+
+With all three fixed the replay reproduces the run: the result row for
+episode 1 subtask 2 reads 51 steps ending 0.89 m from the goal, and the replay
+reaches 0.89 m at step 50 with the goal in view, scored success.
+
+The lesson is not any of the three bugs. It is that a script can carry a green
+test suite and a plausible `--dry-run` while its real work has never executed,
+and that `--dry-run` actively concealed this: it exercised exactly the half
+that worked. A fourth change, matching the replay's warmup budget to the
+runner's 500 steps, was made on a wrong hypothesis before the real cause was
+found; it is correct on its own terms and has been kept.

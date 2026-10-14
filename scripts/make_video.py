@@ -46,6 +46,24 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _runner_max_steps() -> int:
+    """The runner's per-subtask step budget, read from its signature.
+
+    Read rather than copied so that raising one side cannot silently
+    desynchronise the replay. Falls back to the documented 500 when habitat is
+    unavailable, which is the case in the GPU-free test environment.
+    """
+    try:
+        import inspect
+
+        from src.eval.runner import run_episode
+
+        return inspect.signature(run_episode).parameters[
+            "max_steps_per_subtask"].default
+    except Exception:
+        return 500
+
+
 @dataclasses.dataclass(frozen=True)
 class Clip:
     episode_index: int          # index into the dev subset, NOT episode_id
@@ -155,6 +173,49 @@ def _title_card(text: str, subtitle: str, path: str, size=(1280, 720)) -> None:
     cv2.imwrite(path, img)
 
 
+# The replay must give each warmed-up subtask the same budget the evaluation
+# gave it, or the filmed subtask inherits a map and an instance database the
+# real run never had. Imported from the runner rather than copied: episode
+# index 4's warmup subtasks took 338 and 500 steps, debug_episode replayed
+# them with 300, and the clip selected as a success filmed as a failure (6.65).
+EVAL_MAX_STEPS = _runner_max_steps()
+
+
+def replay_succeeded(output: str) -> bool:
+    """Did the replay score the success the clip was chosen for?
+
+    debug_episode prints exactly one verdict line. Match that line and nothing
+    else: the surrounding output mentions successes in other senses, and a
+    crash before scoring must read as failure rather than as absence of
+    evidence (6.65).
+    """
+    for line in output.splitlines():
+        if line.strip().startswith("SCORED:"):
+            return line.split(":", 1)[1].strip().lower() == "success"
+    return False
+
+
+def render_command(clip, n_episodes: int, fps: int, hold: int,
+                   out_dir: str, resolution: int = 256) -> list[str]:
+    """The debug_episode invocation that re-renders one chosen clip.
+
+    `resolution` has to match the run the clip was selected from. The dev
+    evaluation at 512 px scores successes that the same episode replayed at
+    256 px does not reach (6.60), so a cut assembled from one and rendered at
+    the other films the agent failing. Separated out so the test can check
+    that without launching habitat.
+    """
+    return [sys.executable, "-u", "scripts/debug_episode.py",
+            "--episode", str(clip.episode_index),
+            "--subtask", str(clip.subtask_index),
+            "--n-episodes", str(n_episodes),
+            "--steps", str(clip.steps + 5),
+            "--resolution", str(resolution),
+            "--warmup-steps", str(EVAL_MAX_STEPS),
+            "--fps", str(max(1, fps // hold)),
+            "--out", out_dir]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("results_dir", help="a dev-eval output dir with results.csv")
@@ -169,6 +230,9 @@ def main() -> None:
     ap.add_argument("--max-steps", type=int, default=200,
                     help="exclude a success that burned most of the budget "
                          "before scoring; it fills the cut with wandering")
+    ap.add_argument("--resolution", type=int, default=256,
+                    help="sensor resolution of the run that produced "
+                         "results_dir; a mismatch films a different outcome")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the cut without rendering")
     args = ap.parse_args()
@@ -221,18 +285,22 @@ def main() -> None:
               f"subtask {c.subtask_index}", flush=True)
         clip_dir = os.path.join(args.out, f"clip{n}")
         os.makedirs(clip_dir, exist_ok=True)
-        cmd = [sys.executable, "-u", "scripts/debug_episode.py",
-               "--episode", str(c.episode_index),
-               "--subtask", str(c.subtask_index),
-               "--n-episodes", str(args.n_episodes),
-               "--steps", str(c.steps + 5),
-               "--fps", str(max(1, args.fps // hold)),
-               "--out", clip_dir]
-        rc = subprocess.call(cmd)
+        cmd = render_command(c, args.n_episodes, args.fps, hold, clip_dir,
+                             args.resolution)
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True)
+        sys.stdout.write(proc.stdout)
         src = os.path.join(clip_dir,
                            f"ep{c.episode_index}_sub{c.subtask_index}.mp4")
-        if rc != 0 or not os.path.exists(src):
-            print(f"  skipped: debug_episode returned {rc}")
+        if proc.returncode != 0 or not os.path.exists(src):
+            print(f"  skipped: debug_episode returned {proc.returncode}")
+            continue
+        # The clip was chosen because results.csv called it a success. Only
+        # cut it in if the replay agrees -- otherwise the demo shows the agent
+        # failing a goal it is captioned as reaching (6.65).
+        if not replay_succeeded(proc.stdout):
+            print("  SKIPPED: the replay did not score a success, so this "
+                  "footage does not show what the clip claims")
             continue
 
         card = os.path.join(clip_dir, "card.png")

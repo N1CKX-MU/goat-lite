@@ -135,3 +135,118 @@ class TestExcludesBudgetBurners:
         got = sorted(c.steps for c in select_clips(rows, n_clips=4,
                                                    min_steps=8, max_steps=200))
         assert got == [8, 200]
+
+
+class TestRenderMatchesTheRunItFilms:
+    """A clip is chosen from a results.csv and then re-rendered by replaying
+    the episode. If the replay runs a different configuration from the one
+    that produced the row, it films a different outcome -- the 512 px run's
+    successes replay at 256 px as failures, so the demo video would show the
+    agent missing goals it actually reached."""
+
+    def test_the_render_command_carries_the_resolution(self):
+        from scripts.make_video import render_command
+        from scripts.make_video import Clip
+
+        c = Clip(episode_index=4, subtask_index=4, modality="category",
+                 category="plant", steps=20)
+        cmd = render_command(c, n_episodes=30, fps=30, hold=17,
+                             out_dir="/tmp/x", resolution=512)
+
+        assert "--resolution" in cmd
+        assert cmd[cmd.index("--resolution") + 1] == "512"
+
+    def test_the_default_resolution_is_the_sensor_default(self):
+        from scripts.make_video import render_command, Clip
+
+        c = Clip(episode_index=0, subtask_index=0, modality="image",
+                 category="mirror", steps=10)
+        cmd = render_command(c, n_episodes=30, fps=30, hold=1, out_dir="/tmp/x")
+
+        assert cmd[cmd.index("--resolution") + 1] == "256"
+
+    def test_it_renders_enough_steps_to_reach_the_success(self):
+        """Filming exactly `steps` can stop one action short of the stop."""
+        from scripts.make_video import render_command, Clip
+
+        c = Clip(episode_index=4, subtask_index=4, modality="category",
+                 category="plant", steps=20)
+        cmd = render_command(c, n_episodes=30, fps=30, hold=1, out_dir="/tmp/x")
+
+        assert int(cmd[cmd.index("--steps") + 1]) > c.steps
+
+
+class TestWarmupMatchesTheEvalBudget:
+    """debug_episode replays an episode's earlier subtasks to rebuild the map
+    and memory the filmed subtask inherits. It capped each replay at 300 steps
+    while the evaluation gives every subtask 500, so any episode with a long
+    earlier subtask was replayed from a state the real run never had.
+    Measured: episode index 4's warmup subtasks took 338 and 500 steps; the
+    filmed subtask scored success in the run and failure on replay (6.65)."""
+
+    def test_the_render_command_sets_the_eval_step_budget(self):
+        from scripts.make_video import render_command, Clip, EVAL_MAX_STEPS
+
+        c = Clip(episode_index=4, subtask_index=4, modality="category",
+                 category="plant", steps=20)
+        cmd = render_command(c, n_episodes=30, fps=30, hold=1, out_dir="/tmp/x")
+
+        assert "--warmup-steps" in cmd
+        assert int(cmd[cmd.index("--warmup-steps") + 1]) == EVAL_MAX_STEPS
+
+    def test_the_budget_is_the_one_the_runner_actually_uses(self):
+        """Pinned against the runner rather than copied, so raising one side
+        cannot silently desynchronise the replay again."""
+        import inspect
+        from scripts.make_video import EVAL_MAX_STEPS
+        from src.eval.runner import run_episode
+
+        default = inspect.signature(run_episode).parameters[
+            "max_steps_per_subtask"].default
+        assert EVAL_MAX_STEPS == default
+
+    def test_a_first_subtask_needs_no_warmup(self):
+        from scripts.make_video import render_command, Clip
+
+        c = Clip(episode_index=0, subtask_index=0, modality="image",
+                 category="mirror", steps=10)
+        cmd = render_command(c, n_episodes=30, fps=30, hold=1, out_dir="/tmp/x")
+
+        assert "--warmup-steps" in cmd
+
+
+class TestOnlyVerifiedSuccessesAreCut:
+    """A clip is chosen because results.csv says that subtask succeeded, then
+    re-rendered by replaying it. Three separate defects made the replay
+    diverge from the run (6.65), and the cut included the footage regardless,
+    so a video advertised as a working episode could show the agent failing.
+    The replay prints its own verdict; use it."""
+
+    def test_a_scored_success_is_accepted(self):
+        from scripts.make_video import replay_succeeded
+
+        out = ("tracing subtask 2: image/plant, 1 valid instance(s)\n"
+               "CLOSEST approach: 0.89 m at step 50, goal_in_view=True\n"
+               "SCORED: SUCCESS\n")
+        assert replay_succeeded(out) is True
+
+    def test_a_scored_failure_is_rejected(self):
+        from scripts.make_video import replay_succeeded
+
+        out = ("CLOSEST approach: 4.54 m at step 7, goal_in_view=False\n"
+               "SCORED: failure\n")
+        assert replay_succeeded(out) is False
+
+    def test_output_without_a_verdict_is_rejected(self):
+        """A crash before scoring must not read as success."""
+        from scripts.make_video import replay_succeeded
+
+        assert replay_succeeded("Traceback (most recent call last):\n") is False
+        assert replay_succeeded("") is False
+
+    def test_the_word_success_elsewhere_does_not_count(self):
+        from scripts.make_video import replay_succeeded
+
+        out = ("this episode had 3 successes in the run\n"
+               "SCORED: failure\n")
+        assert replay_succeeded(out) is False
