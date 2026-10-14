@@ -887,6 +887,17 @@ Carried through every stage, on the same pair of runs:
 | matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 |
 | scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 |
 
+A second consequence of memory is independently significant and carries the
+same control: the agent is **faster** with it. `steps_taken` averages 380 with
+memory against 422 without (45 subtasks shorter against 22 longer,
+**p = 0.0067**), and the share burning the whole 500-step budget falls from
+78.4% to 73.4%. Split by inheritance, subtask 0 is 1 against 0 (p = 1.000) and
+subtasks 1+ are 44 against 22 (**p = 0.0092**). Recall of candidates and step
+economy are different consequences of the same inherited map and instance
+database, and both appear only where there is something to inherit — one
+significant metric could be a lucky aggregation, two with clean controls is
+the mechanism.
+
 This chain is the central result of the project, and it is more informative
 than any single row of it. The lifelong memory does its job — it roughly
 doubles the rate at which the agent recalls a candidate for its goal on
