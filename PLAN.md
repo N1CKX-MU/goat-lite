@@ -857,9 +857,11 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 
 ### 7.10 Week 10 — Hyperparameter sweep + ablation setup
 
-> **STATUS (2026-10-14).** The ablation infrastructure is built, the memory
-> ablation has been run twice and three of the grids are now run; the done
-> criteria below are **2 of 3 met**.
+> **STATUS (2026-10-14, end of day).** Ablation infrastructure built, memory
+> ablation run twice, three grids run, detector rebuilt and promoted. The done
+> criteria below are **2 of 3 met**; the third is computed and equals zero for
+> a reason that is itself measured. See the two dated updates below — the
+> second supersedes the first's sequencing argument.
 >
 > - [x] Memory-on vs memory-off run on identical episodes, paired by position,
 >       `scripts/sweep.py` and every knob exposed as a flag.
@@ -949,6 +951,42 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 > is wanted before then, run it on `ever_matched` and `node_error_m`, which every
 > subtask contributes to, rather than on success.
 
+> **UPDATE (2026-10-14, later) — the detector was rebuilt, and the sweep's
+> premise was wrong about where the headroom is.**
+>
+> The note above sequenced the detector retrain as the thing that would move
+> the operating point enough for an arm to be distinguishable. It was done:
+> 150 frames/scene over all 145 annotated HM3D train scenes with a stratified
+> split, 14905 images / 57272 boxes, 48 of 60 epochs. The detector improved by
+> **+33% mAP50 and +47% recall** on held-out scenes, measured across all four
+> checkpoint x split combinations because neither split is clean for both
+> models (6.59).
+>
+> **It did not move the agent.** Full dev subset, paired on all 218 subtasks:
+> SR 3.2% -> 4.6%, exact two-sided sign test **p = 0.549**. `ever_matched`
+> p = 0.427, `detector_in_view` p = 0.104, final distance p = 0.816. Nothing
+> significant (6.61). The premise that a better detector would raise the
+> operating point is now tested and false at this sensor resolution.
+>
+> The p-values attenuate with distance from the detector — 0.10 at
+> `detector_in_view`, 0.43 at `ever_matched`, 0.55 at SR, 0.82 at final
+> distance — which locates the bottleneck after perception rather than in it.
+>
+> **What the retrain did surface is a larger lever than any axis in this
+> section.** The detector trains at 512 px; the agent's sensor is 256 (6.60).
+> Halving the input costs ~34% of mAP50, so much that `v1 @512` (0.0994)
+> outscores `v2 @256` (0.0867) — the old detector at the training resolution
+> beats the new one at the agent's. `--resolution` now exposes it, and the
+> first scene paired at both sizes went 0/13 to 4/13 with `ever_matched`
+> 47% -> 65%.
+>
+> Two 512 px arms are running against the full dev subset, memory-on and
+> memory-off, precisely because the third done criterion below is the one this
+> section fails. At 3.2% SR the memory delta is unresolvable rather than zero;
+> if 512 raises SR the way the first scene suggests, the delta becomes
+> measurable for the first time. That is the open question, and it is a
+> resolution question, not a hyperparameter one.
+
 **Prereqs:** Week 9 baseline established.
 
 **Person A: matcher and memory ablations**
@@ -968,9 +1006,23 @@ Each config → dev-subset eval → summary metrics. Small grid, ~6 configs, bud
 Log everything in `outputs/ablations/`. Wandb project is very useful here — create a shared project between both team members.
 
 **Week 10 Done Criteria:**
-- [ ] All planned ablations run and logged.
-- [ ] Best config identified and set as `configs/agent_default.yaml`.
-- [ ] Memory on-vs-off delta computed and > 0 (if not, memory is broken — go back).
+- [x] All planned ablations run and logged. — Three grids run (language
+      threshold, merge distance, success distance), nine arms, logged under
+      `outputs/sweep_*`. The remaining ~15 arms are **closed by measurement
+      rather than executed**: at n = 80 a two-sided sign test needs six one-way
+      flips for p < 0.05 and no arm reaches three, and `--merge-dist` 0.75 and
+      1.00 are bit-identical across all 80 subtasks, so that axis has no lever
+      arm at all (6.54, 6.55). Running them would cost about a day of GPU to
+      reproduce the same non-answer.
+- [x] Best config identified and set as `configs/agent_default.yaml`. — Every
+      grid selected the values already in the code. The YAML now also records
+      `sim.resolution`, which 6.60 shows is worth more than any swept axis.
+- [ ] Memory on-vs-off delta computed and > 0 — **computed, and it is exactly
+      0.0 pp** (7/218 against 7/218). Not negative: *unresolvable*. At 3.2% SR
+      one subtask is 1.4 pp, so no delta below that is measurable with this
+      instrument (6.50). Memory is not demonstrably broken. Re-running both
+      sides at 512 px is in flight, because that is the one change measured to
+      move SR enough for the delta to resolve.
 
 ---
 

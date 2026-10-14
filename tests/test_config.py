@@ -82,6 +82,22 @@ class TestMapping:
             assert m[key] == d[key], key
 
 
+class TestSim:
+    def test_matches_habitat_env_defaults(self, cfg):
+        """The sensor size is a measured hyperparameter, not a detail: the
+        detector scores 0.1318 mAP50 at 512 and 0.0867 at 256 (6.60)."""
+        from src.sim.env import HabitatEnv
+        d = _defaults(HabitatEnv.__init__)
+        assert tuple(d["resolution"]) == (cfg["sim"]["resolution"],) * 2
+
+    def test_the_square_sensor_assumption_holds(self, cfg):
+        """make_intrinsics takes width and height separately, but the YAML
+        records one number. That is only honest while the sensor is square."""
+        from src.sim.env import HabitatEnv
+        w, h = _defaults(HabitatEnv.__init__)["resolution"]
+        assert w == h
+
+
 class TestPerception:
     def test_matches_detector_defaults(self, cfg):
         from src.perception.detector import YOLODetector
