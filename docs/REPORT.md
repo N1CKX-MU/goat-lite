@@ -89,7 +89,7 @@ achievable with a heavyweight modular stack. It does not establish:
 |---|---|---|
 | 1 | Design and implement a complete modular navigation stack — detection, vision-language embedding, occupancy mapping, instance memory, multi-modal goal matching, planning and control — within a 4 GB VRAM budget | **Complete** |
 | 2 | Evaluate on GOAT-Bench `val_unseen` (36 scenes, 360 episodes, 2,669 subtasks); report SR and SPL per modality | In progress — harness built, dev-subset results pending |
-| 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | Pending — gated on end-to-end success |
+| 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | **Complete** — null on SR (0.0 pp, p = 1.000), decisive on matching (43.6% vs 27.1%, p < 0.0001), with subtask 0 as a negative control |
 | 4 | Attribute end-to-end failure to individual components, producing a per-module failure taxonomy backed by measurements | In progress — 32 findings logged |
 | 5 | Quantify the data-availability ceiling that HM3D-Semantics imposes on the benchmark vocabulary | **Complete** — 59.2% |
 | 6 | Release a reproducible public repository with a documented engineering record, including negative results | Ongoing |
@@ -835,13 +835,48 @@ Image goals now embed and match (34 of 67 matched a node) and still never score.
 That is a measurable zero rather than an inactive code path, which is the
 difference between a known limitation and a silent one.
 
-**The memory on/off delta is exactly 0.0 pp**, paired position-by-position over
-all 218 subtasks. Run #2's +0.5 pp sat in the same noise. The per-index deltas
-scatter in both directions (−3.3, −5.0, +5.9, +16.7 pp at indices 2, 5, 6, 9) on
-samples of six to thirty subtasks, so none of them is evidence of a lifelong
-trend. **The headline ablation of this project is, at this operating point,
-inconclusive** — and the reason is given below: memory amplifies perception, and
-there is not yet enough perception to amplify.
+**The memory on/off delta on SR is exactly 0.0 pp**, paired
+position-by-position over all 218 subtasks — 7/218 against 7/218, with five
+discordant pairs each way and an exact two-sided sign test of p = 1.000. Run
+#2's +0.5 pp sat in the same noise. That is a balanced coin, not a weak
+effect, and no amount of additional episodes at this SR would resolve it: one
+subtask is 1.4 pp.
+
+**Measured on the metric memory actually acts on, the ablation is decisive.**
+SR sits four stages downstream of the instance database — match, approach,
+verify, stop — while `ever_matched` (did the matcher ever return a node for
+this goal) is the immediate output of memory, and every subtask contributes to
+it rather than only the successful 3.2%. On the same paired 218 subtasks, with
+no new runs:
+
+| metric | memory on | memory off | discordant | exact two-sided sign test |
+|---|---|---|---|---|
+| SR | 3.2% | 3.2% | 5 / 5 | p = 1.000 |
+| `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | **p < 0.0001** |
+
+The effect also has the shape the lifelong claim requires, which is what
+separates it from a nuisance difference between two runs:
+
+| | n | `ever_matched` on | off | discordant | p |
+|---|---|---|---|---|---|
+| subtask 0 | 30 | 46.7% | 43.3% | 1 / 0 | **1.000** |
+| subtasks 1+ | 188 | 43.1% | 24.5% | 47 / 12 | **0.000005** |
+
+Subtask 0 is a **built-in negative control**. It is the first goal of its
+episode, so there is nothing to inherit and the two arms are the same system;
+they agree, on 29 of 30 subtasks. Every later subtask inherits a map and an
+instance database under memory-on and begins blind under memory-off, and there
+the arms separate by 18.6 points. The effect is present exactly where the
+mechanism is and absent exactly where it is not — the strongest available
+evidence that it is the memory doing the work and not a difference between
+runs.
+
+So the headline ablation is **conclusive on matching and null on success**:
+the lifelong memory roughly doubles the rate at which the agent can locate its
+goal on subtasks that have history, and that advantage does not survive the
+journey to a scored success. The reason is given below — memory amplifies
+perception, and the stages between a matched node and a scored stop lose what
+it supplies.
 
 #### Why the failures fail
 
