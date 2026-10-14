@@ -1416,24 +1416,29 @@ In the order we would attempt them, each targeted at a measured bottleneck:
 
 ## List of Figures and Tables
 
-Figures are not embedded in this Markdown source; the data behind each is in
-the repository and the caption states where. When the official template is
-applied, these are the intended figures:
+All figures are in `docs/figures/`, regenerated from the evaluation artifacts
+by `python scripts/make_figures.py outputs/full_eval --out docs/figures`. Their
+data shaping is tested in `tests/test_figures.py`; re-running the evaluation
+and re-running that command reproduces them.
 
-| # | Figure | Source |
-|---|---|---|
-| 4.1 | System architecture: the sense-plan-act tick | §3.2 diagram |
-| 4.2 | Detector precision-recall by goal category | `runs/detect/runs/goat_yolo/finetune_v2/` |
-| 4.3 | Lifelong curve, pooled vs. controlled for episode length | `outputs/full_eval/results.csv`, §4.6 |
-| 4.4 | Success rate and SPL by modality | `outputs/full_eval/summary.json` |
-| 4.5 | The attenuation chain: matching → usable match → success | §4.6.1 |
-| 4.6 | Failure taxonomy by diagnosis | `outputs/full_eval/failures.jsonl` |
-| 4.7 | Top-down trajectory of a successful episode | `outputs/demo_video/` frames |
+| # | File | Caption | Source |
+|---|---|---|---|
+| 4.1 | `fig_lifelong.png` | The lifelong curve is an artifact of episode-length composition. Pooled over all 360 episodes success appears to rise with subtask index; restricted to the 64 episodes of exactly ten subtasks, where the contributing set is identical at every index, all ten points fall inside two standard errors of a constant 7.8%. Paired within every episode, the second half beats the first in 64 episodes against 49 (p = 0.188). | `outputs/full_eval/results.csv` |
+| 4.2 | `fig_episode_length.png` | Episode length is confounded with difficulty: six-subtask episodes score 14.74%, nine-subtask episodes 5.85%. This is the mechanism behind Figure 4.1. | `outputs/full_eval/results.csv` |
+| 4.3 | `fig_modality.png` | Language trails because its matcher does, not its navigator: success 5.49% against 13.82% for category, with `ever_matched` 49% against 73%. | `outputs/full_eval/results.csv` |
+| 4.4 | `fig_attenuation.png` | Memory's advantage attenuates at every stage after matching: candidate recall p = 0.016, usable match within 1 m p = 0.080, scored success p = 1.000. From the paired 218-subtask memory ablation, not the held-out run. | §4.6.1, dev-subset ablation |
+| 4.5 | `fig_failures.png` | How the 2,417 failed subtasks failed. Half exhaust the step budget; 45% stop early more than a metre out. | `outputs/full_eval/failures.jsonl` |
+| 4.6 | `fig_scene_spread.png` | Scene identity matters more than any hyperparameter swept: per-scene success spans 0.0% to 39.7% around an overall 9.44%, with two scenes yielding nothing. | `outputs/full_eval/results.csv` |
+
+Two further figures are referenced in the text but are not produced by this
+script: the system architecture diagram (§3.2, drawn by hand) and a top-down
+trajectory still from the demo video (`outputs/demo_video/`, frames rendered by
+`scripts/debug_episode.py`).
 
 Principal tables are inline: objectives (§1.3), approach comparison (§2.6),
 module responsibilities (§3.3), final results by modality (§4.6), episode
-length against difficulty (§4.6), per-scene results (Appendix D) and the full
-hyperparameter table (Appendix C).
+length against difficulty (§4.6), per-scene and per-category results
+(Appendix D) and the full hyperparameter table (Appendix C).
 
 ---
 
