@@ -27,6 +27,9 @@
 #   bash scripts/setup_hm3d.sh --train        # download, then verify
 #   bash scripts/setup_hm3d.sh --verify-only  # check what is already on disk
 #   bash scripts/setup_hm3d.sh --list         # show hm3d uids this build offers
+#   bash scripts/setup_hm3d.sh --train --uids hm3d_train_semantic_configs_v0.2
+#
+# Uids whose data is already on disk are skipped; --uids forces a specific set.
 
 set -uo pipefail
 
@@ -63,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --verify-only) MODE="verify"; shift ;;
         --list)        MODE="list"; shift ;;
         --data-path)   DATA_PATH="$2"; shift 2 ;;
+        --uids)        IFS=',' read -r -a UIDS <<< "$2"; shift 2 ;;
         -h|--help)     sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -131,6 +135,32 @@ if [[ "$MODE" == "list" ]]; then
 fi
 
 TRAIN_ROOT="$DATA_PATH/scene_datasets/hm3d/train"
+
+# A uid whose payload is already on disk is skipped, not retried. habitat's
+# downloader does not just fetch: finding a complete tar, it goes straight to
+# EXTRACTING it with Python's tarfile. On this machine that tar's first header
+# is damaged (6.56) and tarfile does not resynchronise, so the attempt dies with
+#
+#     tarfile.ReadError: file could not be opened successfully
+#
+# six times over, to produce 800 scenes that were already extracted by hand.
+# Measured 2026-10-14; it cost two retries before being caught.
+uid_satisfied() {
+    local uid="$1" n
+    case "$uid" in
+        hm3d_train_habitat_v0.2)
+            n=$(find -L "$TRAIN_ROOT" -maxdepth 2 -name '*.basis.glb' 2>/dev/null | wc -l)
+            (( n >= 800 )) ;;
+        hm3d_train_semantic_annots_v0.2)
+            n=$(find -L "$TRAIN_ROOT" -maxdepth 2 -name '*.semantic.glb' 2>/dev/null | wc -l)
+            (( n >= 145 )) ;;
+        hm3d_train_semantic_configs_v0.2)
+            [[ -n "$(find -L "$DATA_PATH/scene_datasets/hm3d" "$DATA_PATH/versioned_data" \
+                      -maxdepth 2 -name 'hm3d_annotated*basis.scene_dataset_config.json' \
+                      2>/dev/null | head -1)" ]] ;;
+        *) return 1 ;;                 # unknown uid: never claim it is done
+    esac
+}
 
 verify() {
     say "verifying $TRAIN_ROOT"
@@ -237,6 +267,10 @@ say "downloading ${#UIDS[@]} uids into $DATA_PATH"
 echo "  roughly 20 GB for the scenes; the two semantic tars are much smaller."
 
 for uid in "${UIDS[@]}"; do
+    if uid_satisfied "$uid"; then
+        ok "$uid is already on disk -- skipping (--uids overrides)"
+        continue
+    fi
     say "$uid"
     attempt=1
     while (( attempt <= RETRIES )); do

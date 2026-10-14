@@ -3362,3 +3362,30 @@ The reason the first request was unauthorized is not recorded; the downloader's
 log predates this session's context. It matters only that an HTTP error body is
 a plausible thing to find at the head of any resumable download, and that
 `-C -` will happily build on it.
+
+**Consequence, same day.** Running `setup_hm3d.sh --train` after extracting the
+scenes by hand failed twice on `hm3d_train_habitat_v0.2` with
+
+```
+tarfile.ReadError: file could not be opened successfully
+```
+
+habitat's downloader does not only fetch. Finding a complete tar on disk it
+skips the transfer and goes straight to **extracting** it, with Python's
+`tarfile` — which is the one reader that does not resynchronise past a bad
+header. So the damaged header turned an already-satisfied uid into six
+scheduled retries, each one attempting to produce 800 scenes that were already
+on disk. It did not re-download the 27.8 GB, but only because the file was the
+right size.
+
+`uid_satisfied()` now short-circuits a uid whose payload is present (800
+`.basis.glb`, 145 `.semantic.glb`, or the annotated config), and `--uids`
+selects a subset explicitly. The general lesson is that "already downloaded"
+and "already usable" are different states, and a downloader that extracts will
+act on the difference.
+
+Worth noting what the denial of an in-place repair cost and saved. Repairing
+the 56 bytes would have made habitat's own tooling able to read the archive;
+not repairing it meant finding out that habitat's tooling tries to. The scenes
+are extracted either way, so the tar is now only a backup, and the skip is the
+fix that generalises.
