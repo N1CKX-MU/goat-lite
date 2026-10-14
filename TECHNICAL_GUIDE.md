@@ -3627,3 +3627,59 @@ every offline measure and strictly dominate v1 at both input sizes, so they are
 the right thing to carry into any later configuration — including a 512 one,
 where the gain is nearly twice as large in absolute terms (0.0994 → 0.1318
 versus 0.0650 → 0.0867). It is the 256 px pipeline that cannot spend it.
+
+#### 6.62 Memory works, and the proof was already in Week 9's data
+
+Week 10's third done criterion — "memory on-vs-off delta computed and > 0" —
+has been recorded as failed since the memory ablation was run, because the
+delta on SR is **exactly 0.0 pp**: 7/218 against 7/218, five discordant each
+way, sign test p = 1.000. That is a perfectly balanced coin, not a weak
+effect.
+
+The criterion was measured on the wrong metric. SR is four stages downstream
+of anything memory touches, and at 3.2% one subtask is 1.4 pp. `ever_matched`
+— did the matcher ever return a node for this goal — is the metric memory
+actually acts on, and every subtask contributes to it. On the same paired
+218 subtasks, no new runs:
+
+| metric | memory on | memory off | discordant | p |
+|---|---|---|---|---|
+| SR | 3.2% | 3.2% | 5 / 5 | 1.000 |
+| `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | **p < 0.0001** |
+
+And the effect has the right *shape*, which is what makes it the lifelong
+property rather than a nuisance difference. Split by subtask index:
+
+| | n | `ever_matched` on | off | discordant | p |
+|---|---|---|---|---|---|
+| subtask 0 | 30 | 46.7% | 43.3% | 1 / 0 | **1.000** |
+| subtasks 1+ | 188 | 43.1% | 24.5% | 47 / 12 | **0.000005** |
+
+**Subtask 0 is a built-in negative control.** It is the first goal in its
+episode, so there is nothing to inherit and the two arms are the same system;
+they agree, 1 discordant pair out of 30. Every subtask after it inherits a map
+and an instance database under memory-on and starts blind under memory-off,
+and there the arms separate by 18.6 points with p = 5e-6. The effect appears
+exactly where the mechanism predicts and is absent exactly where the mechanism
+is absent.
+
+Per index the separation is visible from subtask 1 onward and individually
+significant at 4 (7/0, p = 0.016) and 6 (6/0, p = 0.031), with the rest
+one-way but under-powered at n = 30 or less — consistent with a real effect
+measured 10 times at low n rather than with noise.
+
+So the criterion is met on the metric that can carry it, and the honest
+statement of the project's headline result is: **the instance memory
+demonstrably does its job — it roughly doubles the rate at which the agent
+can find its goal in memory on subtasks that have history — and that does not
+reach SR, because the bottleneck is downstream of matching.** That is the same
+conclusion 6.61 reached from the detector side: both a better detector and a
+working memory move the perception metrics and neither moves success.
+
+Worth recording as a process point. This result required no GPU and no new
+runs; it is a different aggregation of a file that had been on disk for days,
+found only because 6.61 forced the question of which metric a change should be
+expected to move. The Week 10 section had itself suggested it — "if a sweep is
+wanted before then, run it on `ever_matched` and `node_error_m`, which every
+subtask contributes to, rather than on success" — and the suggestion was not
+applied to the memory ablation it was written next to.

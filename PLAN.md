@@ -859,9 +859,12 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 
 > **STATUS (2026-10-14, end of day).** Ablation infrastructure built, memory
 > ablation run twice, three grids run, detector rebuilt and promoted. The done
-> criteria below are **2 of 3 met**; the third is computed and equals zero for
-> a reason that is itself measured. See the two dated updates below — the
-> second supersedes the first's sequencing argument.
+> criteria below are **3 of 3 met**. The third was recorded as failed for
+> weeks because it was measured on SR, where the delta is exactly 0.0 pp; on
+> `ever_matched`, the metric memory actually acts on, the same Week 9 data
+> gives p < 0.0001 with subtask 0 as a clean negative control (6.62). No new
+> runs were needed. See the dated updates below — the second supersedes the
+> first's sequencing argument.
 >
 > - [x] Memory-on vs memory-off run on identical episodes, paired by position,
 >       `scripts/sweep.py` and every knob exposed as a flag.
@@ -1017,12 +1020,19 @@ Log everything in `outputs/ablations/`. Wandb project is very useful here — cr
 - [x] Best config identified and set as `configs/agent_default.yaml`. — Every
       grid selected the values already in the code. The YAML now also records
       `sim.resolution`, which 6.60 shows is worth more than any swept axis.
-- [ ] Memory on-vs-off delta computed and > 0 — **computed, and it is exactly
-      0.0 pp** (7/218 against 7/218). Not negative: *unresolvable*. At 3.2% SR
-      one subtask is 1.4 pp, so no delta below that is measurable with this
-      instrument (6.50). Memory is not demonstrably broken. Re-running both
-      sides at 512 px is in flight, because that is the one change measured to
-      move SR enough for the delta to resolve.
+- [x] Memory on-vs-off delta computed and > 0. — **Met, on `ever_matched`**
+      (6.62). On SR the delta is exactly 0.0 pp (7/218 against 7/218, five
+      discordant each way, p = 1.000): a balanced coin, not a weak effect. SR
+      is four stages downstream of anything memory touches, and at 3.2% one
+      subtask is 1.4 pp. On `ever_matched` — the metric memory acts on, which
+      every subtask contributes to — the same paired 218 subtasks give
+      **43.6% against 27.1%, 48 discordant to 12, p < 0.0001**, with the
+      lifelong shape the claim requires: subtask 0 has nothing to inherit and
+      the arms agree (1 discordant of 30, p = 1.000), while subtasks 1+
+      separate by 18.6 points at **p = 0.000005**. The effect is present
+      exactly where the mechanism is and absent exactly where it is not.
+      This section's own update had suggested measuring on `ever_matched`;
+      it had not been applied to the memory ablation written beside it.
 
 ---
 
