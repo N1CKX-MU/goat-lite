@@ -29,7 +29,12 @@ from src.sim.goat_dataset import (
     sample_dev_subset,
     quaternion_from_coeffs,
 )
-from src.eval.runner import _resolve_scene_path, _make_goal_spec
+from src.eval.runner import (
+    _resolve_scene_path,
+    _make_goal_spec,
+    _embed_image_goal,
+)
+from src.eval.episode_order import eval_episode_order
 from src.eval.metrics import instance_in_view, subtask_success
 from src.utils.viz import render_topdown, draw_detections, compose_frame, legend_lines
 from scripts.run_dev_eval import build_agent
@@ -43,7 +48,10 @@ def main() -> None:
     ap.add_argument("--warmup-subtasks", type=int, default=None,
                     help="run the preceding subtasks first so memory/map match "
                          "the real eval (defaults to --subtask)")
-    ap.add_argument("--warmup-steps", type=int, default=300)
+    # 500 is the runner's per-subtask budget. At 300 any episode with a long
+    # earlier subtask was replayed from a state the real run never reached,
+    # and the replay diverged from the result it was selected from (6.65).
+    ap.add_argument("--warmup-steps", type=int, default=500)
     ap.add_argument("--steps", type=int, default=300)
     ap.add_argument("--n-episodes", type=int, default=2,
                     help="dev-subset size; must match the run being debugged")
@@ -54,18 +62,27 @@ def main() -> None:
     ap.add_argument("--dataset-root",
                     default="data/datasets/goat_bench/hm3d/v1/val_unseen")
     ap.add_argument("--hm3d-root", default="data/hm3d")
+    # Must match the run being replayed. A success produced at 512 px replays
+    # as a failure at 256 (6.60), so a demo cut assembled from a 512 run and
+    # rendered at the default would film the agent missing its goals.
+    ap.add_argument("--resolution", type=int, default=256,
+                    help="square sensor resolution; match the run being replayed")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
 
     eps = load_val_unseen(args.dataset_root)
     dev = sample_dev_subset(eps, n=args.n_episodes, seed=args.seed)
-    ep = dev[args.episode]
+    # In EVAL order, not dev-subset order. The runner groups by scene, so
+    # results.csv is scene-grouped; indexing the dev subset here made
+    # --episode 1 replay what the results call episode 27 (6.65).
+    ep = eval_episode_order(dev)[args.episode]
     print(f"episode {args.episode}: {ep.episode_id}  scene={ep.scene_id}")
     print(f"subtasks: {[(s.modality, s.category) for s in ep.subtasks]}")
 
     env = HabitatEnv(scene_path=_resolve_scene_path(ep.scene_id, args.hm3d_root),
-                     seed=args.seed)
+                     seed=args.seed,
+                     resolution=(args.resolution, args.resolution))
     state = habitat_sim.AgentState()
     state.position = ep.start_position.tolist()
     state.rotation = quaternion_from_coeffs(ep.start_rotation)
@@ -73,11 +90,24 @@ def main() -> None:
 
     agent = build_agent(env.intrinsics, scene_bounds=env.get_scene_bounds())
 
+    def _goal_spec_for(subtask):
+        """Exactly what runner.py builds, embedding included.
+
+        An image goal's embedding comes from rendering the goal viewpoint; it
+        is not in the episode JSON. Without it the matcher has nothing to
+        compare against and the agent wanders, so a replay that skips this
+        step diverges from the run it is replaying (6.65).
+        """
+        spec = _make_goal_spec(subtask)
+        if subtask.modality == "image":
+            spec.goal_embedding = _embed_image_goal(env, agent, subtask)
+        return spec
+
     # Replay the earlier subtasks so map and memory match the real run -- the
     # interesting failures only appear once memory is populated.
     warm = args.warmup_subtasks if args.warmup_subtasks is not None else args.subtask
     for i in range(min(warm, len(ep.subtasks))):
-        env.set_goal(_make_goal_spec(ep.subtasks[i]))
+        env.set_goal(_goal_spec_for(ep.subtasks[i]))
         obs = env._make_obs()
         agent.reset(obs, keep_memory=(i > 0))
         for _ in range(args.warmup_steps):
@@ -90,7 +120,7 @@ def main() -> None:
 
     sub = ep.subtasks[args.subtask]
     goals = [np.asarray(c.position) for c in sub.goal_candidates]
-    env.set_goal(_make_goal_spec(sub))
+    env.set_goal(_goal_spec_for(sub))
     obs = env._make_obs()
     agent.reset(obs, keep_memory=(args.subtask > 0))
 
