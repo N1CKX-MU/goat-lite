@@ -1,18 +1,62 @@
 # GOAT-Lite: Multi-Modal Lifelong Object Navigation under Constrained Compute
 
-**Project report (working draft).** Chapters 1–3 are complete; Chapter 4 is an
-interim account of implementation and results as of **2026-09-16**; Chapter 5
-is a placeholder until the evaluation is complete.
+**Project report — complete draft, 2026-10-15.** All five chapters are
+written. Chapter 4 reports the final held-out evaluation.
 
 Course: Project I (BCSE497J) · Team: Nishaanth S (23BRS1114), Muhammed Mujtaba
 Dar (23BRS1118), Shaurya Jha (23BAI1464) · Guide: Dr. Nithyanandam P
 
 > **Status note.** Every number in this document is a measurement taken from
 > this repository, and the measurement that produced it is named. Where a
-> result does not exist yet it is marked *pending*, not estimated. The
-> end-to-end success rate is currently **0%**, and Chapter 4 explains precisely
-> where the pipeline stops short. Formatting will be adapted once the official
-> template is released; only the content is fixed here.
+> result does not exist it is marked so, never estimated. Formatting will be
+> adapted to the official template; only the content is fixed here.
+
+---
+
+## Abstract
+
+Embodied navigation agents are usually asked for one kind of goal at a time: a
+category name, or a photograph, or a sentence. GOAT (Chang et al., RSS 2024)
+asks for all three in sequence within a single episode, and requires the agent
+to carry an instance-level memory of what it has seen from one goal to the
+next — the *lifelong* property. This report replicates that setting at a
+reduced operating point: a fully modular, classical pipeline (YOLOv8n, CLIP
+ViT-B/32, a log-odds occupancy grid, A\* and frontier exploration driven by a
+finite state machine), with no learned policy and no end-to-end training,
+constrained throughout to a 4 GB laptop GPU.
+
+Evaluated once on the held-out GOAT-Bench `val_unseen` split — 360 episodes,
+2,669 subtasks, 36 unseen HM3D scenes — the agent reaches **9.44% success rate
+and 0.0830 SPL**: 13.82% on category goals, 8.27% on image goals and 5.49% on
+language goals. These are modest absolute figures, and the contribution of
+this work is the attributed account of *why* they are modest rather than the
+figures themselves.
+
+Three findings are the substance of that account. First, the binding
+constraint is perception and not navigation: the agent explores roughly 97% of
+the navigable area, and 58% of failures never match any candidate instance for
+the goal. Second, the instance memory demonstrably works — it roughly doubles
+the rate at which a candidate is recalled (43.6% against 27.1%, p = 0.016) with
+the first subtask of each episode serving as a built-in negative control — yet
+that advantage does not survive the stages between a match and a scored stop,
+because the extra candidates it supplies sit a median 3.43 m from the true
+object. Third, and most consequential for how such systems are evaluated, the
+*lifelong curve* that this class of work reports is, in our data, an artifact:
+pooled across episodes success appears to rise with subtask index, but only
+long episodes contribute late subtasks and episode length is strongly
+confounded with difficulty; controlling for it removes the effect entirely
+(p = 0.188 paired within episode).
+
+A supporting methodological result is that the 30-episode development subset
+on which such systems are routinely iterated carries only 61 distinct goals and
+has 36.7% power to detect even a ten-point change in success rate — it reported
+image-goal success as exactly 0.0% where the full split gives 8.27%. The work
+is accompanied by 67 dated engineering-log entries, each paired with the
+measurement that produced it and including negative results and withdrawn
+claims, and by a test suite of 350 cases.
+
+**Keywords:** embodied AI, object-goal navigation, multi-modal goals, lifelong
+memory, open-vocabulary perception, habitat-sim, HM3D, constrained compute.
 
 ---
 
@@ -85,7 +129,7 @@ achievable with a heavyweight modular stack. It does not establish:
 
 ### 1.3 Objectives
 
-| # | Objective | Status (2026-09-16) |
+| # | Objective | Status (2026-10-15) |
 |---|---|---|
 | 1 | Design and implement a complete modular navigation stack — detection, vision-language embedding, occupancy mapping, instance memory, multi-modal goal matching, planning and control — within a 4 GB VRAM budget | **Complete** |
 | 2 | Evaluate on GOAT-Bench `val_unseen` (36 scenes, 360 episodes, 2,669 subtasks); report SR and SPL per modality | **Complete** — SR 9.44%, SPL 0.0830 over all 2,669 subtasks; category 13.82%, image 8.27%, language 5.49% |
@@ -444,7 +488,7 @@ local run as a documented fallback.
 
 ---
 
-## Chapter 4 — Implementation and Results *(interim, 2026-09-16)*
+## Chapter 4 — Implementation and Results
 
 ### 4.1 Implementation Status
 
@@ -1160,70 +1204,194 @@ have been addressed and are reported in §4.4. What remains:
    visible surface to sit up to `max(0.5·range, range − 1 m)` in front of the
    centroid. Downloading `hm3d-val-semantic-annots` would permit the faithful
    semantic-mask test.
-3. **Image goals do not use the goal image.** They are localised by category, so
-   the referenced instance is selected with probability ≈ 0.58 (§4.5.3). This is
-   required work, not an optional extension.
+3. **Image goals use the goal image, but only as an appearance prior.** All
+   822 image subtasks of the final run embedded their goal view
+   (`image_goal_embedded` is true for every one), and the modality scores
+   8.27% — the development subset's 0.0% was a sample-size artifact. What
+   remains is that matching is a CLIP cosine ranking within the goal category
+   rather than a geometric verification, so where a category has several
+   instances the referenced one is still selected at close to chance
+   (§4.5.3).
 4. **No pitch action.** The agent cannot look up or down, which is what makes
    the vertical framing limit of §4.5.2 binding rather than merely inconvenient.
-5. **The detector is undertrained** (epoch 39 of 60, learning rate never
-   annealed), and its in-radius ceiling caps the whole system.
+5. **Detector recall remains the binding constraint.** The detector was
+   retrained to convergence (48 of 60 epochs, early-stopped on patience, best
+   at epoch 33) on 2.5x the data, raising held-out mAP50 from 0.128 to 0.170
+   and recall from 0.17 to 0.22. That improvement did not move end-to-end
+   success measurably (p = 0.549), and six goal categories remain at zero
+   recall, so the in-radius ceiling still caps the system.
 6. **The evidence gate is set, not swept.** `min_observations = 2` and
    `trust_confidence = 0.5` are reasoned from the probe's confidence range but
    the values are not yet measured; {1, 2, 3} is planned on the development
    subset.
-7. **Scale of evidence.** The development evaluation is 218 subtasks over 22
-   scenes. Per-category conclusions rest on single-digit counts and should be
-   read as diagnostic.
+7. **Scale of evidence.** The headline numbers are the full split — 2,669
+   subtasks over 36 scenes — but per-category conclusions still rest on small
+   counts (`photo mount` has 2 subtasks, `hanger` 4) and should be read as
+   diagnostic. The development subset used for all configuration decisions
+   carries only 61 distinct goals and is underpowered for success rate
+   (§4.6.2); choices locked on it should be revisited at adequate power.
+8. **No outdoor environments.** All 36 scenes are building interiors, 43-258 m²
+   of explored area. Goal categories that sound exterior — `parapet`,
+   `handrail`, `statue` — occur as interior architectural features; the one
+   long-navigation `parapet` success is an indoor room at a window. Nothing in
+   this evaluation speaks to outdoor performance.
 
 ### 4.8 Comparison with the Reference Work
 
-A quantitative comparison with published GOAT results is **not yet meaningful**,
-and will be framed carefully when it is. GOAT operates with large detectors and
-keypoint-based image matching at a compute budget an order of magnitude above
-this one, and reports results on physical robots as well as in simulation.
+This work now has a number on the same split the reference work uses:
+**9.44% SR / 0.0830 SPL on GOAT-Bench `val_unseen`**, from one held-out run of
+all 360 episodes.
 
-The intended comparison is therefore not "our SR versus theirs" but:
+A direct "our SR versus theirs" table should be assembled from the published
+figures in [1] and [2] when this document is prepared for submission; those
+numbers are *not* reproduced here, because they were not re-derived in this
+repository and everything else in this report is a measurement taken from it.
+The comparison also needs framing rather than tabulating: GOAT uses large
+detectors and keypoint-based image matching at a compute budget roughly an
+order of magnitude above this one, and reports on physical robots as well as
+in simulation, so the gap conflates several independent reductions.
 
-- **Which components proved load-bearing** in a minimal implementation, and
-  which could be reduced without consequence;
-- **What the compute reduction costs**, expressed per component;
-- **Whether the lifelong memory effect survives** at this perception quality —
-  the hypothesis of §1.5, and the one finding that would generalise beyond this
-  implementation.
+The comparison this work can make on its own terms is more specific:
 
-### 4.9 Immediate Next Steps
+- **Which components proved load-bearing.** Perception, overwhelmingly. The
+  agent explores ~97% of the navigable area and 58% of failures never match a
+  candidate; neither the planner nor the exploration rule was ever the limiting
+  stage, and three planner and frontier variants could not be separated at the
+  resolution available (§4.6.2).
+- **What the compute reduction costs, per component.** A YOLOv8n detector at
+  mAP50 0.170 with six categories at zero recall; a CLIP ViT-B/32 text encoder
+  that grounds descriptions to the right instance only 49.4% of the time; and a
+  256 px sensor that was costing a third of the detector's own accuracy before
+  it was raised to 512 (§6.60).
+- **Whether the lifelong memory effect survives at this perception quality.**
+  This was the hypothesis of §1.5 and the answer is partial and precise: the
+  memory effect is real and significant at the stage it acts on — candidate
+  recall, p = 0.016 — and is undetectable by the time it reaches success rate.
+  The pooled lifelong curve that appears to show otherwise is an artifact of
+  episode-length composition (§4.6). This is the finding most likely to
+  generalise beyond this implementation, because it is a property of how the
+  benchmark is aggregated rather than of this agent.
 
-Items 1–3 of the previous revision — the bearing check, the evidence gate and
-`clear()` — are done (§4.4), and the development evaluation is running. What
-follows, in order of expected value:
+### 4.9 Status of the Planned Work
 
-1. **Image-goal matching** (§4.5.3). Render the goal pose, crop it with the
-   detector so the goal embedding comes from the same distribution as the
-   stored node embeddings, and match image-to-image within the goal category.
-   67 of 218 development subtasks are currently near chance.
-2. **Memory on/off ablation**, now that memory can be switched off — the key
-   experiment of §3.5, running on identical episodes.
-3. **Sweep `min_observations` ∈ {1, 2, 3}** and the commit distance, both of
-   which are currently reasoned rather than measured.
-4. **Re-measure the ceiling in-radius** and report SR against the achievable
-   subset as well as the raw total.
-5. **Complete detector training** to epoch 60 and re-measure mAP and the
-   ceiling.
-6. **Semantic assets for the validation split**, which would replace the
-   depth-based occlusion proxy and the centroid test with the faithful
-   visibility criterion.
+Everything listed as an immediate next step in the previous revision has been
+carried out, with one exception:
+
+| planned | outcome |
+|---|---|
+| Image-goal matching | Done. All 822 image subtasks embed their goal view; the modality scores 8.27%, against the development subset's apparent 0.0% |
+| Memory on/off ablation | Done on identical episodes. Significant on candidate recall (p = 0.016), null on success (§4.6.1) |
+| Complete detector training | Done. 48 of 60 epochs, early-stopped; mAP50 0.128 → 0.170, recall 0.17 → 0.22 (§4.3) |
+| Re-measure the in-radius ceiling | Done (§4.5) |
+| Sweep `min_observations` ∈ {1, 2, 3} | **Not done.** Deferred on measured grounds: at the available resolution no arm of any swept axis could be separated (§4.6.2), so the sweep would cost GPU time to produce a non-answer |
+| Semantic assets for the validation split | Not done. Train-split semantics were obtained and used for detector training; validation semantics would replace the depth-occlusion proxy with the faithful test |
+
+Remaining work is forward-looking rather than remedial and is set out in §5.4.
 
 ---
 
 ## Chapter 5 — Conclusion and Future Work
 
-*To be written once the development evaluation and ablations are complete.*
+### 5.1 Summary of Work
 
-Planned content: summary of work completed; major findings (the failure
-taxonomy, the 59.2% data ceiling, and the outcome of the memory hypothesis);
-conclusion; limitations; and future enhancements — completing detector training,
-open-vocabulary detection, stronger image-goal verification via keypoint
-matching, and deployment on physical hardware.
+A complete multi-modal lifelong object-navigation agent was built and
+evaluated. Every stage is classical and inspectable: a YOLOv8n detector
+finetuned to the 36-category GOAT vocabulary, CLIP ViT-B/32 embeddings for
+appearance and language matching, a log-odds occupancy grid with ray clearing,
+frontier exploration, A\* planning with pure-pursuit control, and a
+finite-state machine arbitrating search, approach and verification. An
+instance-level memory persists across the subtasks of an episode, which is the
+property under test. The system runs within 3 GB of VRAM on an RTX 3050.
+
+It was evaluated once, as the protocol in Section 3.5 requires, on the
+held-out `val_unseen` split: 360 episodes, 2,669 subtasks, 36 unseen scenes,
+14.9 hours of compute.
+
+### 5.2 Principal Findings
+
+**The agent works, modestly.** SR 9.44%, SPL 0.0830. Category goals 13.82%,
+image goals 8.27%, language goals 5.49%.
+
+**The binding constraint is perception, not navigation.** The agent covers
+roughly 97% of the navigable area of a scene, and 58% of failures never match
+a candidate for the goal at all. Exploration is not what is missing.
+
+**Language is the weakest modality for a locatable reason.** Its
+`ever_matched` rate is 49.4% against roughly 73% for the other two modalities.
+The agent is not failing to walk to described objects; it is failing to
+determine which instance a description denotes. That is CLIP text-instance
+matching, and it is the single clearest lever this evaluation exposes.
+
+**The memory works and does not reach the score.** Memory roughly doubles the
+rate at which a candidate is recalled — 43.6% against 27.1%, p = 0.016 when
+clustered by distinct goal — and the first subtask of each episode acts as a
+built-in negative control, with the two arms agreeing on 29 of 30. But the
+candidates it adds sit a median 3.43 m from the true object, so the advantage
+attenuates at every subsequent stage: matching p = 0.016, usable matches
+within 1 m p = 0.080, scored success p = 1.000.
+
+**The lifelong curve is an artifact, and this is the result we would most want
+carried forward.** Pooled across episodes, success rises from 8.1% at the first
+subtask to 11.7% by the fourth and falls thereafter — the shape this class of
+work reports. It does not survive control. Only long episodes contribute late
+subtasks, and episode length is strongly confounded with difficulty
+(6-subtask episodes score 14.74%, 9-subtask episodes 5.85%). Within episodes of
+a fixed length the curve is flat, and paired within every episode the second
+half beats the first in 64 episodes against 49, p = 0.188. Any report of a
+lifelong curve that pools across episode lengths should be read with this in
+mind.
+
+**A data-availability ceiling bounds what is achievable.** Across the goal
+categories with fewer than twenty annotated training instances, roughly 4% of
+subtasks cannot be won by any detector trained on HM3D-Semantics;
+`refrigerator` alone is 17.4% of all `val_unseen` goals against 124 training
+instances.
+
+**The development subset cannot answer the questions it was asked.** Thirty
+episodes carry only 61 distinct goals and have 36.7% power to detect even a
+ten-point change in success rate. It reported image-goal success as exactly
+0.0% where the truth is 8.27%. Related: GOAT-Bench repeats the same object
+within an episode, so subtask-level significance tests overstate themselves —
+218 dev subtasks carry 61 goals, and two claims made during this work were
+withdrawn once that was corrected.
+
+### 5.3 Limitations
+
+The agent is modular and unlearned by design, so it cannot recover from a
+perception failure through policy. Detector recall is low in absolute terms
+(mAP50 0.170 on held-out scenes) and six goal categories remain at zero
+recall. The success criterion requires the goal to be visible from within
+1.0 m, and with a 1.41 m camera, a 90° vertical field of view and no pitch
+action, 14.2% of subtasks have a goal that cannot be framed from anywhere a
+scoring stop could occur. All evaluation is in simulation, on building
+interiors only; the split contains no outdoor environments. Finally, the
+single reserved held-out run means configuration choices were locked on a
+development subset now known to be underpowered.
+
+### 5.4 Future Work
+
+In the order we would attempt them, each targeted at a measured bottleneck:
+
+1. **Open-vocabulary detection** in place of the closed 36-class detector,
+   removing the HM3D-Semantics annotation ceiling that bounds roughly 4% of
+   subtasks outright and depresses the rare categories generally.
+2. **Stronger language-to-instance grounding.** Language trails the other
+   modalities by 24 points of `ever_matched`; a cross-encoder or a
+   region-grounded model in place of plain CLIP cosine similarity addresses
+   precisely that stage.
+3. **Localisation of matched instances.** Memory supplies more candidates at
+   an unchanged median error of 3.8 m. Multi-view triangulation of an
+   instance's position, rather than single back-projected bounding-box centres,
+   would convert existing matches into successes without improving recall at
+   all.
+4. **A pitch action or a second camera**, to address the 14.2% of subtasks
+   whose goals cannot be framed from a legal stopping pose.
+5. **Evaluation at adequate power.** Development iteration should be done on
+   `ever_matched` and `node_error_m`, which every subtask contributes to,
+   rather than on success rate; or on a development split selected for
+   distinct-goal count rather than episode count.
+6. **Physical deployment**, which the modular design and the 3 GB memory
+   envelope were chosen to keep feasible.
 
 ---
 
@@ -1246,7 +1414,30 @@ matching, and deployment on physical hardware.
 
 ---
 
-## Appendices *(to be assembled)*
+## List of Figures and Tables
+
+Figures are not embedded in this Markdown source; the data behind each is in
+the repository and the caption states where. When the official template is
+applied, these are the intended figures:
+
+| # | Figure | Source |
+|---|---|---|
+| 4.1 | System architecture: the sense-plan-act tick | §3.2 diagram |
+| 4.2 | Detector precision-recall by goal category | `runs/detect/runs/goat_yolo/finetune_v2/` |
+| 4.3 | Lifelong curve, pooled vs. controlled for episode length | `outputs/full_eval/results.csv`, §4.6 |
+| 4.4 | Success rate and SPL by modality | `outputs/full_eval/summary.json` |
+| 4.5 | The attenuation chain: matching → usable match → success | §4.6.1 |
+| 4.6 | Failure taxonomy by diagnosis | `outputs/full_eval/failures.jsonl` |
+| 4.7 | Top-down trajectory of a successful episode | `outputs/demo_video/` frames |
+
+Principal tables are inline: objectives (§1.3), approach comparison (§2.6),
+module responsibilities (§3.3), final results by modality (§4.6), episode
+length against difficulty (§4.6), per-scene results (Appendix D) and the full
+hyperparameter table (Appendix C).
+
+---
+
+## Appendices
 
 - **A — Engineering log.** 67 dated findings with the measurement that produced
   each, in `TECHNICAL_GUIDE.md` §6, including negative results and failed fixes.
@@ -1256,5 +1447,101 @@ matching, and deployment on physical hardware.
   mirrors the constructor defaults that actually run and is held to them by
   `tests/test_config.py`; each measured value is annotated with the
   engineering-log section that produced it.
-- **D — Per-scene and per-category results.** *Pending the development evaluation.*
-- **E — Individual contribution statement.** *Pending.*
+- **D — Per-scene and per-category results.** Reproduced in full below, from
+  the single held-out run (`outputs/full_eval/results.csv`).
+- **E — Individual contribution statement.** To be completed by the team; the
+  git history (`git shortlog -sn`, and the dated entries of
+  `TECHNICAL_GUIDE.md` §6) is the supporting record.
+
+### Appendix D.1 — Results by scene
+
+All 36 `val_unseen` scenes. Scene success rate ranges from 0.0% to 39.7%, with
+a median of 6.3%; two scenes yield no successes at all. The spread is wider
+than any configuration change measured during development, which is worth
+stating plainly: scene identity matters more to the outcome than most of the
+hyperparameters that were swept.
+
+| scene | subtasks | SR | SPL | `ever_matched` |
+|---|---|---|---|---|
+| `00800-TEEsavR23oF` | 73 | 5.5% | 0.054 | 32% |
+| `00802-wcojb4TFT35` | 78 | 15.4% | 0.120 | 68% |
+| `00803-k1cupFYWXJ6` | 71 | 32.4% | 0.273 | 86% |
+| `00808-y9hTuugGdiq` | 72 | 8.3% | 0.066 | 54% |
+| `00810-CrMo8WxCyVb` | 85 | 15.3% | 0.140 | 85% |
+| `00813-svBbv1Pavdk` | 78 | 5.1% | 0.051 | 94% |
+| `00814-p53SfW6mjZe` | 86 | 2.3% | 0.023 | 55% |
+| `00815-h1zeeAwLh9Z` | 79 | 2.5% | 0.025 | 46% |
+| `00820-mL8ThkuaVTM` | 78 | 24.4% | 0.225 | 92% |
+| `00821-eF36g7L6Z9M` | 72 | 15.3% | 0.145 | 68% |
+| `00823-7MXmsvcQjpJ` | 65 | 3.1% | 0.018 | 57% |
+| `00824-Dd4bFSTQ8gi` | 63 | 3.2% | 0.032 | 63% |
+| `00827-BAbdmeyTvMZ` | 69 | 7.2% | 0.040 | 59% |
+| `00829-QaLdnwvtxbs` | 78 | 39.7% | 0.349 | 97% |
+| `00831-yr17PDCnDDW` | 70 | 8.6% | 0.086 | 77% |
+| `00832-qyAac8rV8Zk` | 66 | 6.1% | 0.061 | 70% |
+| `00835-q3zU7Yy5E5s` | 72 | 2.8% | 0.028 | 57% |
+| `00839-zt1RVoi7PcG` | 78 | 3.8% | 0.038 | 79% |
+| `00843-DYehNKdT76V` | 76 | 1.3% | 0.005 | 25% |
+| `00844-q5QZSEeHe5g` | 77 | 1.3% | 0.013 | 58% |
+| `00847-bCPU9suPUw9` | 81 | 7.4% | 0.066 | 94% |
+| `00848-ziup5kvtCCR` | 67 | 0.0% | 0.000 | 54% |
+| `00849-a8BtkwhxdRV` | 79 | 6.3% | 0.056 | 85% |
+| `00853-5cdEh9F2hJL` | 71 | 4.2% | 0.032 | 73% |
+| `00861-GLAQ4DNUx5U` | 75 | 8.0% | 0.062 | 61% |
+| `00862-LT9Jq6dN3Ea` | 69 | 13.0% | 0.116 | 74% |
+| `00869-MHPLjHsuG27` | 68 | 26.5% | 0.226 | 66% |
+| `00871-VBzV5z6i1WS` | 71 | 9.9% | 0.087 | 54% |
+| `00873-bxsVRursffK` | 81 | 2.5% | 0.025 | 46% |
+| `00876-mv2HUxq3B53` | 72 | 0.0% | 0.000 | 60% |
+| `00877-4ok3usBNeis` | 78 | 3.8% | 0.038 | 44% |
+| `00878-XB4GS9ShBRE` | 76 | 17.1% | 0.171 | 54% |
+| `00880-Nfvxx8J5NCo` | 76 | 13.2% | 0.103 | 97% |
+| `00890-6s7QHgap2fW` | 70 | 12.9% | 0.119 | 57% |
+| `00891-cvZr5TUy5C5` | 79 | 5.1% | 0.040 | 58% |
+| `00894-HY1NcmCgn3n` | 70 | 5.7% | 0.042 | 41% |
+
+### Appendix D.2 — Results by goal category
+
+All 36 GOAT categories as they appear in `val_unseen`. Note the shape of the
+distribution: `mirror`, `refrigerator` and `picture` are 48% of all subtasks
+between them, and `refrigerator` — 464 subtasks, 17.4% of the split — scores
+1.7% against the 124 annotated training instances available for it.
+
+| goal category | subtasks | SR | `ever_matched` |
+|---|---|---|---|
+| mirror | 483 | 22.8% | 84% |
+| refrigerator | 464 | 1.7% | 75% |
+| picture | 325 | 22.2% | 89% |
+| dresser | 158 | 0.0% | 53% |
+| rug | 156 | 0.0% | 86% |
+| microwave | 132 | 2.3% | 41% |
+| plant | 128 | 14.1% | 95% |
+| statue | 69 | 0.0% | 0% |
+| decorative plant | 68 | 29.4% | 85% |
+| carpet | 57 | 0.0% | 84% |
+| hanging clothes | 46 | 10.9% | 50% |
+| book | 45 | 8.9% | 47% |
+| glass | 44 | 0.0% | 2% |
+| piano | 43 | 0.0% | 5% |
+| island | 38 | 0.0% | 47% |
+| calendar | 36 | 0.0% | 0% |
+| parapet | 35 | 5.7% | 29% |
+| handrail | 34 | 0.0% | 0% |
+| nightstand | 34 | 0.0% | 44% |
+| window glass | 33 | 6.1% | 88% |
+| vase | 31 | 0.0% | 52% |
+| pillow | 29 | 0.0% | 24% |
+| freezer | 25 | 0.0% | 0% |
+| flowerpot | 23 | 0.0% | 78% |
+| flower vase | 21 | 23.8% | 57% |
+| radiator | 18 | 0.0% | 50% |
+| christmas tree | 18 | 0.0% | 0% |
+| stair | 15 | 0.0% | 93% |
+| shower glass | 13 | 0.0% | 0% |
+| boiler | 12 | 25.0% | 0% |
+| footrest | 10 | 0.0% | 40% |
+| photo | 9 | 0.0% | 0% |
+| exercise bike | 7 | 0.0% | 0% |
+| printer | 4 | 0.0% | 0% |
+| hanger | 4 | 0.0% | 25% |
+| photo mount | 2 | 0.0% | 0% |
