@@ -3419,9 +3419,20 @@ because a class present in one scene cannot be in both and having it in train
 is strictly better than having it only in val; if the requested fraction cannot
 be reached without stranding something, it returns fewer val scenes. Scene
 contents come from each scene's `semantic.txt` rather than from habitat, since
-the split has to be decided before any rendering starts. On the real corpus,
-at the same seed and the same 14 val scenes, this takes classes with a train
-scene from **35/36 to 36/36**.
+the split has to be decided before any rendering starts. On the real corpus at
+seed 42 it takes classes with a train scene from **35/36 to 36/36**, and it
+does so by changing exactly one scene: the naive shuffle picks val scenes
+`{18, 30, 38, 51, 71, 81, 88, 110, 112, 120, 130, 133, 137, 141}` and the
+stratified walk refuses 141 — the sole `christmas tree` scene — taking 82
+instead. 13 of the 14 are shared. An earlier version of this entry said the
+two splits chose the same 14 scenes, which was wrong; the one swap is the whole
+mechanism.
+
+Worth recording because it bit later: the dataset `checkpoints/yolo_goat.pt`
+was trained on in August used neither of these. `val_scenes = set(range(n_val))`
+took the first 14 scenes in sorted order, a prefix split. That one happens to
+strand nothing — the `christmas tree` scene is index 141, nowhere near the
+front — so the stranding is a property of shuffling, not of splitting by scene.
 
 Two things this does not fix, and they are the real ceiling. `christmas tree`
 still has one instance, so it is unlearnable from HM3D-Semantics whichever
@@ -3448,3 +3459,83 @@ changes the previous run's copy of a scene stays behind on the other side and
 the same image appears in both halves. `--out` now refuses a non-empty
 directory unless `--force` is given. Caught before it happened, while preparing
 to re-render over the first build.
+
+#### 6.58 The finetuner threw away a 48-epoch run because `project` is not a path
+
+`finetune_yolo.py` composed the export source itself:
+
+```python
+best = os.path.join(args.project, args.name, "weights", "best.pt")
+if not os.path.exists(best):
+    raise SystemExit(f"Training finished but {best} not found.")
+```
+
+The 60-epoch v2 run trained for 48 epochs, early-stopped on `patience=15`,
+re-validated, printed its per-class table, and then exited 1 with *Training
+finished but runs/goat_yolo/finetune_v2/weights/best.pt not found*. The weights
+were on disk the whole time, at
+`runs/detect/runs/goat_yolo/finetune_v2/weights/best.pt`.
+
+`project` is not a filesystem path to ultralytics. It resolves it against the
+`runs_dir` key in its own `settings.yaml`, which defaults to `runs/detect`, so
+`project="runs/goat_yolo"` lands at `runs/detect/runs/goat_yolo`. Composing the
+path only works when `runs_dir` happens to be `.`. Nothing was lost — the run
+had already written `best.pt` and `last.pt` — but an unattended two-hour job
+reported failure after succeeding, which is the kind of exit code that gets a
+run relaunched.
+
+`resolve_best_weights()` now asks the trainer where it wrote, in order:
+`trainer.best`, then `trainer.save_dir/weights/best.pt`, then the composed path
+as a last resort, skipping any candidate that does not exist and naming all
+three in the error if none do. `os.fspath` because `save_dir` is a `pathlib.Path`.
+`tests/test_finetune_paths.py` pins all six cases.
+
+This is the same shape as 6.46 and the self-matching `pkill` patterns: a check
+written against an assumption about someone else's path convention, which
+reports a false negative rather than a crash.
+
+#### 6.59 The detector rebuild is a real improvement, measured four ways
+
+v2 of the detector — 150 frames/scene instead of 60, 145 annotated scenes,
+stratified split, 14905 images / 57272 boxes — trained 48 of 60 epochs
+(early-stopped, best at epoch 33) at 119 s/epoch.
+
+Neither checkpoint has an uncontaminated common test set: `split_v1` is a
+prefix split (scenes 0000–0013) and `split_v2` is the stratified one
+(`{18, 30, ... 137}`), and each model trained on the other's val scenes. So all
+four combinations were measured rather than one:
+
+| weights | on `split_v1` | on `split_v2` |
+|---|---|---|
+| v1 (`yolo_goat_v1_map0149.pt`) | **0.1276** (clean) | 0.1467 (trained on these scenes) |
+| v2 (`yolo_goat_v2.pt`) | 0.2046 (trained on these scenes) | **0.1700** (clean) |
+
+mAP50; mAP50-95 is 0.0833 / 0.0966 / 0.1367 / 0.1093 in the same order.
+
+The comparison that matters is the diagonal: **v2's clean 0.1700 against v1's
+clean 0.1276, +33% relative.** And it holds the hard way round too — v2's clean
+score beats v1's *contaminated* score (0.1467), so no assumption about which
+scenes August's build held out can reverse it. Recall, which 6.32 identifies as
+the binding constraint, goes 0.167 → 0.245 on `split_v1` and 0.177 → 0.217 on
+`split_v2`.
+
+The 0.149 quoted throughout this document and in `CLAUDE.md` came from the
+training-time `results.csv` of the August run at its best epoch. Re-validating
+the exported `best.pt` today on a 2.5× denser rendering of the same held-out
+scenes gives 0.1276. The figure was never wrong about the run; it was a
+best-epoch number from a different val rendering, and is not comparable to a
+re-validation. 0.1276 is the number to compare against.
+
+What the extra frames bought, per class on `split_v2`: `boiler` 0.528 mAP50
+from 10 val images, `nightstand` 0.342, `radiator` 0.345, `flower vase` 0.219,
+`island` 0.267 — all classes that 6.52 recorded at or near zero. `picture`
+reaches 0.647 and `mirror` 0.413, the two highest-demand goal categories.
+
+What it did not buy, and the reason is 6.57's ceiling rather than the training:
+`footrest`, `glass`, `parapet`, `photo`, `piano` and `statue` are still at
+recall 0.00, each with 6–22 val instances. And three classes — `christmas tree`,
+`shower glass`, `exercise bike` — have **zero val instances**, so they are
+absent from the per-class table entirely. The stratified split guarantees every
+class a *train* scene; it says nothing about val. `christmas tree` now has 14
+train boxes instead of 0, which is what 6.57 was for, but there is still no
+measurement of whether the detector learned it.
