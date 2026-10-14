@@ -449,3 +449,63 @@ class TestAblationPairing:
         text = compare(str(tmp_path / "a"), str(tmp_path / "b"))
         assert "1 subtasks paired" in text
         assert "diverge" in text
+
+
+class TestSplIsAlwaysANumber:
+    """One subtask with a non-finite geodesic made the whole run's headline
+    SPL `nan`. Measured on the full val_unseen run: 48 of 1013 subtasks had
+    shortest_path_length == inf (habitat returns inf when start and goal are
+    on different navmesh islands), and 7 of those succeeded with
+    actual_path == 0.0 -- the agent spawned on the goal. inf/inf is nan, nan
+    propagates through the mean, and summary.json reported overall_spl nan
+    (6.66)."""
+
+    def test_an_unreachable_goal_the_agent_somehow_reached(self):
+        from src.eval.metrics import compute_spl
+
+        spl = compute_spl(success=True, shortest_path=float("inf"),
+                          actual_path=0.0)
+
+        assert spl == spl, "SPL must never be nan"
+        assert 0.0 <= spl <= 1.0
+
+    def test_a_non_finite_geodesic_with_real_travel(self):
+        from src.eval.metrics import compute_spl
+
+        spl = compute_spl(success=True, shortest_path=float("inf"),
+                          actual_path=5.0)
+
+        assert spl == spl
+        assert 0.0 <= spl <= 1.0
+
+    def test_nan_geodesic_is_handled_too(self):
+        from src.eval.metrics import compute_spl
+
+        spl = compute_spl(success=True, shortest_path=float("nan"),
+                          actual_path=5.0)
+
+        assert spl == spl
+        assert 0.0 <= spl <= 1.0
+
+    def test_the_ordinary_case_is_unchanged(self):
+        from src.eval.metrics import compute_spl
+
+        assert compute_spl(True, 10.0, 10.0) == 1.0
+        assert compute_spl(True, 5.0, 10.0) == 0.5
+        assert compute_spl(False, 5.0, 10.0) == 0.0
+        assert compute_spl(True, 0.0, 0.0) == 1.0
+
+    def test_an_aggregate_never_comes_out_nan(self):
+        from src.eval.metrics import aggregate_metrics
+
+        rows = [
+            {"success": True, "spl": 1.0, "modality": "category", "subtask_index": 0},
+            {"success": True, "spl": float("nan"), "modality": "category", "subtask_index": 1},
+            {"success": False, "spl": 0.0, "modality": "image", "subtask_index": 2},
+        ]
+
+        out = aggregate_metrics(rows)
+
+        assert out["overall_spl"] == out["overall_spl"], "aggregate SPL is nan"
+        for m in out["by_modality"].values():
+            assert m["spl"] == m["spl"]

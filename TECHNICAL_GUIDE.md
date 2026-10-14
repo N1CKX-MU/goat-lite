@@ -3875,3 +3875,39 @@ and that `--dry-run` actively concealed this: it exercised exactly the half
 that worked. A fourth change, matching the replay's warmup budget to the
 runner's 500 steps, was made on a wrong hypothesis before the real cause was
 found; it is correct on its own terms and has been kept.
+
+#### 6.66 One unreachable goal made the whole run's SPL `nan`
+
+The full `val_unseen` run reported `"overall_spl": NaN` in `summary.json` while
+SR was a perfectly ordinary 11.5%. Headline metric, silently destroyed.
+
+`_geodesic_distance` returns `inf` when start and goal sit on different navmesh
+islands, which on this split is common: **48 of the first 1013 subtasks** had a
+non-finite `shortest_path_length`. Seven of those *succeeded* with
+`actual_path_length` 0.0 — the agent spawned inside the success radius and
+stopped immediately. `compute_spl` then evaluated `inf / max(inf, 0.0)`, which
+is `nan`, and one `nan` in a list turns `sum(...)/len(...)` into `nan` for the
+whole aggregate and for every by-modality and by-subtask-index breakdown.
+
+What makes this worth an entry is the failure mode rather than the arithmetic.
+It does not crash, it does not warn, and SR — the number one looks at first —
+stays correct and plausible. The run had been going five hours before anyone
+read `summary.json` closely enough to notice.
+
+Two changes. `compute_spl` now treats a non-finite geodesic explicitly: the
+subtask has no defined path-efficiency, because the quantity SPL normalises by
+does not exist, so it scores 1.0 when the agent succeeded without travelling
+(no path is shorter than none) and 0.0 otherwise. That is the pessimistic
+reading, chosen so a broken geodesic can never flatter the result. And
+`aggregate_metrics` drops non-finite values rather than propagating them,
+because `results.csv` files written before this fix still contain them.
+
+Corrected on the live run: **SPL 0.0923** over the finite rows, or 0.0966
+recomputed from scratch with the fixed rule. The difference between those two
+is the seven spawned-on-goal successes, which the old code could not score at
+all.
+
+The same hazard applies to `node_error_m` and `distance_to_goal`, both of
+which can be `inf` for a subtask with no reachable goal. Neither is currently
+averaged into a headline, but any future aggregate over them needs the same
+guard.

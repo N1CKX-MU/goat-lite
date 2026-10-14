@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from collections import defaultdict
 
 import numpy as np
@@ -132,14 +134,46 @@ def compute_spl(
         actual_path: total distance the agent actually traveled.
 
     Returns:
-        SPL value in [0, 1].
+        SPL value in [0, 1]. Never nan.
+
+    A non-finite ``shortest_path`` is not hypothetical: habitat returns inf
+    when start and goal sit on different navmesh islands, and on the full
+    val_unseen run 48 of 1013 subtasks had one. Seven of those *succeeded*
+    with ``actual_path`` 0.0 -- the agent spawned on the goal -- and inf/inf
+    is nan, which propagated through the mean and made the run's headline
+    ``overall_spl`` nan (6.66).
+
+    Such a subtask has no defined path-efficiency, because the quantity SPL
+    normalises by does not exist. It is scored 1.0 when the agent succeeded
+    without travelling, since no shorter path is possible than none, and 0.0
+    otherwise -- the pessimistic reading, so a broken geodesic can never
+    flatter the result.
     """
     if not success:
         return 0.0
+    if not math.isfinite(shortest_path):
+        return 1.0 if actual_path == 0.0 else 0.0
     if shortest_path == 0.0 and actual_path == 0.0:
         return 1.0
     denom = max(shortest_path, actual_path)
+    if denom == 0.0:
+        return 1.0
     return float(shortest_path / denom)
+
+
+def _mean_spl(rows: list[dict]) -> float:
+    """Mean SPL over rows, ignoring any that are not finite.
+
+    compute_spl no longer emits nan, but results.csv files written before
+    6.66 contain some, and a single nan turns the whole aggregate into nan
+    rather than into a slightly wrong number -- a failure mode that is silent
+    in a summary and fatal in a report.
+    """
+    vals = [float(r["spl"]) for r in rows]
+    finite = [v for v in vals if math.isfinite(v)]
+    if not finite:
+        return 0.0
+    return sum(finite) / len(finite)
 
 
 def aggregate_metrics(results: list[dict]) -> dict:
@@ -170,7 +204,7 @@ def aggregate_metrics(results: list[dict]) -> dict:
     successes = [r["success"] for r in results]
     spls = [r["spl"] for r in results]
     overall_sr = sum(successes) / len(successes)
-    overall_spl = sum(spls) / len(spls)
+    overall_spl = _mean_spl(results)
 
     # By modality
     by_mod: dict[str, list[dict]] = defaultdict(list)
@@ -180,10 +214,10 @@ def aggregate_metrics(results: list[dict]) -> dict:
     by_modality = {}
     for mod, rs in by_mod.items():
         s = [r["success"] for r in rs]
-        sp = [r["spl"] for r in rs]
+        sp = rs
         by_modality[mod] = {
             "sr": sum(s) / len(s),
-            "spl": sum(sp) / len(sp),
+            "spl": _mean_spl(sp),
             "count": len(rs),
         }
 
@@ -195,10 +229,10 @@ def aggregate_metrics(results: list[dict]) -> dict:
     by_subtask_index = {}
     for idx, rs in sorted(by_idx.items()):
         s = [r["success"] for r in rs]
-        sp = [r["spl"] for r in rs]
+        sp = rs
         by_subtask_index[idx] = {
             "sr": sum(s) / len(s),
-            "spl": sum(sp) / len(sp),
+            "spl": _mean_spl(sp),
             "count": len(rs),
         }
 
