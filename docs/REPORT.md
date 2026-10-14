@@ -1175,7 +1175,7 @@ matching, and deployment on physical hardware.
 
 ## Appendices *(to be assembled)*
 
-- **A — Engineering log.** 63 dated findings with the measurement that produced
+- **A — Engineering log.** 64 dated findings with the measurement that produced
   each, in `TECHNICAL_GUIDE.md` §6, including negative results and failed fixes.
 - **B — Reproduction.** Environment, commands and locally runnable episodes, in
   `docs/DEMO.md`.

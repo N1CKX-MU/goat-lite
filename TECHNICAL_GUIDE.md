@@ -3766,3 +3766,59 @@ This also retrospectively strengthens 6.54's conclusion. The Week 10 sweep was
 judged under-powered at n = 80 subtasks; those 80 subtasks carry far fewer
 distinct goals, so the grid was even further below the resolution of the
 instrument than that entry claimed.
+
+#### 6.64 The dev subset has at most 37% power for a 10-point SR change
+
+6.63 established that the unit of evidence is a distinct goal, not a subtask.
+Counting them changes what the development subset can be asked:
+
+| set | episodes | subtasks | distinct `(episode, category)` goals |
+|---|---|---|---|
+| dev subset | 30 | 218 | **61** |
+| full `val_unseen` | 360 | 2669 | **1018** |
+
+Simulating the exact two-sided sign test at alpha = 0.05, over independent
+paired Bernoulli goals:
+
+| metric | true lift | dev (61 goals) | `val_unseen` (1018) |
+|---|---|---|---|
+| SR-like, base 4% | +2 pp | **2.4%** | 51.5% |
+| SR-like, base 4% | +5 pp | **10.4%** | 99.4% |
+| SR-like, base 4% | +10 pp | **36.7%** | 100% |
+| `ever_matched`-like, base 44% | +5 pp | 6.3% | 61.4% |
+| `ever_matched`-like, base 44% | +10 pp | 14.5% | 99.4% |
+| `ever_matched`-like, base 44% | +17 pp | 39.9% | 100% |
+
+**The dev subset cannot see a 10-point swing in success rate more often than
+one time in three.** Every null result recorded this term — the v2 detector
+(6.61), the nine sweep arms (6.54), memory on SR (6.62) — is consistent with a
+real effect of a size that would matter, measured with an instrument that
+cannot resolve it. That is a different statement from "the change did
+nothing", and the project has been making the wrong one.
+
+It also explains the pattern of what *did* reach significance. The surviving
+results are all on `ever_matched` and `detector_in_view`, whose base rates are
+44% and 13% rather than 3%, and whose effects were large: memory's +16.5 pp
+and 512 px's +22.8 pp are near the top of the table above, which is the only
+region the dev subset can reach at all.
+
+Caveat on the simulation: it treats the two arms as independent Bernoulli
+draws per goal. Real paired arms share trajectory structure, concordant pairs
+drop out of a sign test, and that raises power above these figures. Treat the
+table as the right order of magnitude rather than an exact operating
+characteristic — the conclusion survives either way, because the gap between
+2.4% and 51.5% is not a modelling detail.
+
+The practical consequences:
+
+- **Stop using the dev subset to decide SR questions.** It is adequate for
+  perception metrics with high base rates and large effects, and nothing else.
+  Iterate on `ever_matched`, `detector_in_view` and `node_error_m`.
+- **Expanding the dev subset would help less than it looks.** Power scales
+  with distinct goals, not subtasks, and GOAT-Bench gives 0.38 goals per
+  subtask on the full set against 0.28 here. Doubling the episodes buys
+  roughly sqrt(2) in resolution at 4x the wall clock.
+- **The one reserved `val_unseen` run is the only instrument in this project
+  that can resolve a success-rate claim**, at >99% power for 5 points. That is
+  an argument for spending it on the best configuration available rather than
+  the earliest one that looks finished.

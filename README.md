@@ -17,7 +17,7 @@ throughout, 256×256 sensors, and every model choice. Peak usage stays under 3 G
 ## What this repository is for
 
 The interesting output is not a leaderboard number but an **attributed account
-of what fails** at a reduced operating point. Four results so far:
+of what fails** at a reduced operating point. Five results so far:
 
 - **The lifelong memory works, and does not reach the score.** Measured over
   218 subtasks paired position-by-position, memory on against memory off, the
@@ -32,6 +32,14 @@ of what fails** at a reduced operating point. Four results so far:
   61 of them and the uncorrected tests overstate themselves badly — §6.63,
   which is the entry to read before trusting any number here.
   §6.62.
+- **An instrument that cannot answer its own question.** The 30-episode
+  development subset has 218 subtasks but only **61 distinct goals**, because
+  GOAT-Bench asks for the same object by category, by description and by
+  photograph within one episode. Its power to detect even a 10-point change in
+  success rate is **36.7%**; the full `val_unseen` run reaches 99.4% at 5
+  points. Every null result here is therefore consistent with a real effect
+  too small for this instrument, which is a different claim from "nothing
+  happened". §6.63, §6.64.
 - **A data-availability ceiling.** Of the development subtasks, a large share
   cannot be won by *any* navigator, because the detector never fires on the goal
   — a property of HM3D-Semantics, not of the policy. See
@@ -42,7 +50,7 @@ of what fails** at a reduced operating point. Four results so far:
   no pitch action, 14.2% of subtasks have a goal that cannot be framed from
   anywhere a scoring stop could happen — every `rug` subtask among them. §6.35,
   §6.42.
-- **A per-component failure taxonomy**, with 63 dated findings in
+- **A per-component failure taxonomy**, with 64 dated findings in
   `TECHNICAL_GUIDE.md` §6, each paired with the measurement that produced it,
   **including the hypotheses that turned out to be wrong**.
 
