@@ -3539,3 +3539,51 @@ absent from the per-class table entirely. The stratified split guarantees every
 class a *train* scene; it says nothing about val. `christmas tree` now has 14
 train boxes instead of 0, which is what 6.57 was for, but there is still no
 measurement of whether the detector learned it.
+
+#### 6.60 The agent's 256 px sensor throws away more detector than retraining added
+
+The v2 detector was validated at `imgsz=512`, the size it was trained at. The
+agent's RGB sensor is 256×256 (`env.py:70`). Running both checkpoints over both
+val splits at both sizes, all at the agent's `conf=0.15`:
+
+| | `split_v1` | `split_v2` |
+|---|---|---|
+| v1 @256 | 0.0650 | 0.0774 |
+| v1 @512 | 0.0994 | 0.1145 |
+| v2 @256 | 0.1206 | 0.0867 |
+| v2 @512 | 0.1695 | 0.1318 |
+
+mAP50. (These are lower than 6.59's table, which used ultralytics' default
+`conf=0.001`; the comparison within this table is self-consistent.)
+
+Two things fall out. The first is reassuring: **v2 beats v1 at both sizes**, by
+the same +33% on the clean diagonal — 0.0650 → 0.0867 at 256, 0.0994 → 0.1318
+at 512. The retraining gain is not an artifact of validating at 512, and the
+promotion stands.
+
+The second is not. **Halving the input costs ~34% of mAP50 for both models**,
+which is larger than the entire v2 improvement. Stated the damaging way round:
+`v1 @512` (0.0994) beats `v2 @256` (0.0867). The old detector at the training
+resolution outperforms the new detector at the agent's resolution. Whatever the
+detector weights are, the sensor is throwing away more than the weights can
+make back.
+
+Note this is not fixed by the detector's `imgsz=512` default — it upsamples a
+256 px frame to 512 at inference, which cannot restore detail the renderer
+never produced. The information is lost at render time.
+
+`run_dev_eval.py` grew `--resolution` so the lever is testable; every
+geometric consumer already derives its intrinsics from the frame size
+(`make_intrinsics(hfov, w, h)`), and `tests/test_sensor_resolution.py` pins
+that — focal length scales, the principal point stays centred, and a pixel at
+the same fractional position back-projects to the same ray at 256 and 512. The
+cost is 4× the pixels per step; on this card the dev eval sits at 10% GPU
+utilisation and 2.0 GB of 6.1 GB, so it is sim-bound rather than
+GPU-bound (consistent with 6.53) and there is headroom to pay it.
+
+Also added: `save_results(..., config=...)` writes the resolved run
+configuration into `summary.json`. Today's three sweep grids produced output
+directories that were indistinguishable from their contents — `results.csv`
+carries no `scene_id` and `summary.json` carried no settings — so the arms had
+to be told apart by directory name and paired positionally (6.54). Any run
+from here on says what produced it.

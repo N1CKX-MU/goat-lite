@@ -94,13 +94,19 @@ def resumable_prefix(prior, scene_keys):
 def save_results(
     results: list[SubtaskResult],
     output_dir: str,
+    config: dict | None = None,
 ) -> None:
     """Save full evaluation results to output_dir.
 
     Creates:
         results.csv       — one row per subtask
-        summary.json      — aggregated metrics
+        summary.json      — aggregated metrics (plus ``config``, if given)
         failures.jsonl    — one JSON line per failed subtask
+
+    ``config`` is the resolved run configuration. Without it an output
+    directory does not say what produced it: today's three sweep grids had to
+    be told apart by directory name and paired positionally, because
+    results.csv carries no scene_id and summary.json carried no settings.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -146,6 +152,9 @@ def save_results(
     summary["detector_in_view_rate"] = sum(
         1 for r in results if r.detector_in_view
     ) / n
+
+    if config is not None:
+        summary["config"] = config
 
     summary_path = os.path.join(output_dir, "summary.json")
     with open(summary_path, "w") as f:

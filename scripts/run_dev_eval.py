@@ -113,6 +113,12 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--hm3d-root", type=str, default="data/hm3d")
+    # The detector is trained at 512 px and loses 34% of its mAP50 when the
+    # input is 256 (6.60) -- more than the whole v2 retraining gained. All
+    # intrinsics derive from the frame size, so this is safe to change; it
+    # costs 4x the pixels per step.
+    parser.add_argument("--resolution", type=int, default=256,
+                        help="square RGB/depth sensor resolution (default 256)")
     parser.add_argument("--dataset-root", type=str,
                         default="data/datasets/goat_bench/hm3d/v1/val_unseen")
     parser.add_argument("--resume", action="store_true",
@@ -181,6 +187,13 @@ def main():
     scene_count = 0
     scenes_done = 0
 
+    # Recorded into summary.json so an output directory says what produced it.
+    # vars(args) rather than a hand-listed dict: the hand-listed version is the
+    # one that goes stale when a flag is added, which is the same failure the
+    # results.csv fieldnames had.
+    run_config = {k: v for k, v in sorted(vars(args).items())
+                  if k not in ("output_dir", "resume")}
+
     if args.resume:
         # Resume at SCENE granularity, never mid-episode: memory and the map
         # persist across the subtasks of an episode, so replaying half an
@@ -213,7 +226,11 @@ def main():
         print(f"\n[{scene_count}/{len(by_scene)}] Loading scene: {scene_path}")
 
         try:
-            env = HabitatEnv(scene_path=scene_path, seed=args.seed)
+            env = HabitatEnv(
+                scene_path=scene_path,
+                seed=args.seed,
+                resolution=(args.resolution, args.resolution),
+            )
         except Exception as e:
             print(f"  ERROR loading scene: {e}")
             continue
@@ -272,13 +289,13 @@ def main():
         # last scene is not acceptable. Saving per scene makes any crash cost at
         # most one scene.
         if all_results:
-            save_results(all_results, args.output_dir)
+            save_results(all_results, args.output_dir, config=run_config)
             print(f"  [checkpoint] {len(all_results)} subtasks saved to "
                   f"{args.output_dir}")
 
     # Save results
     if all_results:
-        save_results(all_results, args.output_dir)
+        save_results(all_results, args.output_dir, config=run_config)
     else:
         print("\nNo results collected!")
 
