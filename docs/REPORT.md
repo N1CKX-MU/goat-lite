@@ -89,7 +89,7 @@ achievable with a heavyweight modular stack. It does not establish:
 |---|---|---|
 | 1 | Design and implement a complete modular navigation stack — detection, vision-language embedding, occupancy mapping, instance memory, multi-modal goal matching, planning and control — within a 4 GB VRAM budget | **Complete** |
 | 2 | Evaluate on GOAT-Bench `val_unseen` (36 scenes, 360 episodes, 2,669 subtasks); report SR and SPL per modality | In progress — harness built, dev-subset results pending |
-| 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | **Complete** — null on SR (0.0 pp, p = 1.000), decisive on matching (43.6% vs 27.1%, p < 0.0001), with subtask 0 as a negative control |
+| 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | **Complete** — attenuation chain measured: matching 43.6% vs 27.1% (p < 0.0001), usable matches 12.8% vs 7.8% (p = 0.08), SR 3.2% vs 3.2% (p = 1.000), with subtask 0 as a negative control |
 | 4 | Attribute end-to-end failure to individual components, producing a per-module failure taxonomy backed by measurements | In progress — 32 findings logged |
 | 5 | Quantify the data-availability ceiling that HM3D-Semantics imposes on the benchmark vocabulary | **Complete** — 59.2% |
 | 6 | Release a reproducible public repository with a documented engineering record, including negative results | Ongoing |
@@ -871,12 +871,30 @@ mechanism is and absent exactly where it is not — the strongest available
 evidence that it is the memory doing the work and not a difference between
 runs.
 
-So the headline ablation is **conclusive on matching and null on success**:
-the lifelong memory roughly doubles the rate at which the agent can locate its
-goal on subtasks that have history, and that advantage does not survive the
-journey to a scored success. The reason is given below — memory amplifies
-perception, and the stages between a matched node and a scored stop lose what
-it supplies.
+The matches memory adds are, however, **mostly badly localised**, and that is
+where the effect dies. `node_error_m` is the distance from the matched node to
+the nearest true instance; a success needs the agent within 1 m of the goal.
+Of the 48 subtasks matched only with memory on, the median node error is
+**3.43 m** and only 16 (33%) fall within 1 m. Where both arms matched (n = 47)
+memory does not improve localisation at all: median 4.07 m on against 3.75 m
+off, p = 0.864. **Memory adds recall, not precision.**
+
+Carried through every stage, on the same pair of runs:
+
+| stage | memory on | memory off | discordant | p |
+|---|---|---|---|---|
+| matched anything | 43.6% | 27.1% | 48 / 12 | **< 0.0001** |
+| matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 |
+| scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 |
+
+This chain is the central result of the project, and it is more informative
+than any single row of it. The lifelong memory does its job — it roughly
+doubles the rate at which the agent recalls a candidate for its goal on
+subtasks with history — but two thirds of the candidates it adds sit more than
+a metre from the object, so the advantage is already half gone by the
+usable-match stage and entirely gone by the time it reaches a score. Both
+numbers are true of the same two runs, and quoting either alone misrepresents
+the system.
 
 #### Why the failures fail
 

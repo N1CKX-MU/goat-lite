@@ -3668,13 +3668,36 @@ significant at 4 (7/0, p = 0.016) and 6 (6/0, p = 0.031), with the rest
 one-way but under-powered at n = 30 or less — consistent with a real effect
 measured 10 times at low n rather than with noise.
 
-So the criterion is met on the metric that can carry it, and the honest
-statement of the project's headline result is: **the instance memory
-demonstrably does its job — it roughly doubles the rate at which the agent
-can find its goal in memory on subtasks that have history — and that does not
-reach SR, because the bottleneck is downstream of matching.** That is the same
-conclusion 6.61 reached from the detector side: both a better detector and a
-working memory move the perception metrics and neither moves success.
+**The matches memory adds are mostly badly localised, and that is where the
+effect dies.** `node_error_m` is the distance from the matched node to the
+nearest true instance of the goal; success needs the agent within 1 m. Of the
+48 subtasks matched only with memory on, the median node error is **3.43 m**
+and only 16 (33%) are within 1 m. On the 47 subtasks where both arms matched,
+memory does not improve localisation at all — median 4.07 m on against 3.75 m
+off, 16 closer against 18, p = 0.864. Memory adds recall, not precision.
+
+Carrying that through gives the full attenuation chain on one pair of runs:
+
+| stage | memory on | memory off | discordant | p |
+|---|---|---|---|---|
+| matched anything | 43.6% | 27.1% | 48 / 12 | **< 0.0001** |
+| matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 |
+| scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 |
+
+Each stage loses the signal the one before it carried. That is the precise
+statement of this project's central difficulty and it is now measured rather
+than argued: **the instance memory does its job — it roughly doubles the rate
+at which the agent recalls a candidate for the goal — but two thirds of the
+candidates it adds are more than a metre from the object, so the advantage is
+already half gone by the usable-match stage and entirely gone by SR.**
+
+So the criterion is met: the delta is computed and is greater than zero, with
+p < 0.0001 on the metric memory acts on. It should be reported with the chain
+above rather than alone, because 48/12 at p < 1e-4 and 5/5 at p = 1.000 are
+both true of the same two runs, and quoting either without the other
+misrepresents the system. That is the same conclusion 6.61 reached from the
+detector side: both a better detector and a working memory move the
+perception metrics, and neither moves success.
 
 Worth recording as a process point. This result required no GPU and no new
 runs; it is a different aggregation of a file that had been on disk for days,
