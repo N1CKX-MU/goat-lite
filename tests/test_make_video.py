@@ -213,3 +213,40 @@ class TestWarmupMatchesTheEvalBudget:
         cmd = render_command(c, n_episodes=30, fps=30, hold=1, out_dir="/tmp/x")
 
         assert "--warmup-steps" in cmd
+
+
+class TestOnlyVerifiedSuccessesAreCut:
+    """A clip is chosen because results.csv says that subtask succeeded, then
+    re-rendered by replaying it. Three separate defects made the replay
+    diverge from the run (6.65), and the cut included the footage regardless,
+    so a video advertised as a working episode could show the agent failing.
+    The replay prints its own verdict; use it."""
+
+    def test_a_scored_success_is_accepted(self):
+        from scripts.make_video import replay_succeeded
+
+        out = ("tracing subtask 2: image/plant, 1 valid instance(s)\n"
+               "CLOSEST approach: 0.89 m at step 50, goal_in_view=True\n"
+               "SCORED: SUCCESS\n")
+        assert replay_succeeded(out) is True
+
+    def test_a_scored_failure_is_rejected(self):
+        from scripts.make_video import replay_succeeded
+
+        out = ("CLOSEST approach: 4.54 m at step 7, goal_in_view=False\n"
+               "SCORED: failure\n")
+        assert replay_succeeded(out) is False
+
+    def test_output_without_a_verdict_is_rejected(self):
+        """A crash before scoring must not read as success."""
+        from scripts.make_video import replay_succeeded
+
+        assert replay_succeeded("Traceback (most recent call last):\n") is False
+        assert replay_succeeded("") is False
+
+    def test_the_word_success_elsewhere_does_not_count(self):
+        from scripts.make_video import replay_succeeded
+
+        out = ("this episode had 3 successes in the run\n"
+               "SCORED: failure\n")
+        assert replay_succeeded(out) is False

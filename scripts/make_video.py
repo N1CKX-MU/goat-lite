@@ -181,6 +181,20 @@ def _title_card(text: str, subtitle: str, path: str, size=(1280, 720)) -> None:
 EVAL_MAX_STEPS = _runner_max_steps()
 
 
+def replay_succeeded(output: str) -> bool:
+    """Did the replay score the success the clip was chosen for?
+
+    debug_episode prints exactly one verdict line. Match that line and nothing
+    else: the surrounding output mentions successes in other senses, and a
+    crash before scoring must read as failure rather than as absence of
+    evidence (6.65).
+    """
+    for line in output.splitlines():
+        if line.strip().startswith("SCORED:"):
+            return line.split(":", 1)[1].strip().lower() == "success"
+    return False
+
+
 def render_command(clip, n_episodes: int, fps: int, hold: int,
                    out_dir: str, resolution: int = 256) -> list[str]:
     """The debug_episode invocation that re-renders one chosen clip.
@@ -273,11 +287,20 @@ def main() -> None:
         os.makedirs(clip_dir, exist_ok=True)
         cmd = render_command(c, args.n_episodes, args.fps, hold, clip_dir,
                              args.resolution)
-        rc = subprocess.call(cmd)
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True)
+        sys.stdout.write(proc.stdout)
         src = os.path.join(clip_dir,
                            f"ep{c.episode_index}_sub{c.subtask_index}.mp4")
-        if rc != 0 or not os.path.exists(src):
-            print(f"  skipped: debug_episode returned {rc}")
+        if proc.returncode != 0 or not os.path.exists(src):
+            print(f"  skipped: debug_episode returned {proc.returncode}")
+            continue
+        # The clip was chosen because results.csv called it a success. Only
+        # cut it in if the replay agrees -- otherwise the demo shows the agent
+        # failing a goal it is captioned as reaching (6.65).
+        if not replay_succeeded(proc.stdout):
+            print("  SKIPPED: the replay did not score a success, so this "
+                  "footage does not show what the clip claims")
             continue
 
         card = os.path.join(clip_dir, "card.png")
