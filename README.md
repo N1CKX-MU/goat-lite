@@ -17,8 +17,29 @@ throughout, 256×256 sensors, and every model choice. Peak usage stays under 3 G
 ## What this repository is for
 
 The interesting output is not a leaderboard number but an **attributed account
-of what fails** at a reduced operating point. Three results so far:
+of what fails** at a reduced operating point. Five results so far:
 
+- **The lifelong memory works, and does not reach the score.** Measured over
+  218 subtasks paired position-by-position, memory on against memory off, the
+  effect attenuates at every stage: the agent matches a candidate for its goal
+  43.6% of the time against 27.1% (p = 0.016), but the matched node is no
+  better localised (4.07 m against 3.75 m, p = 0.864) and the success rate is
+  identical, 3.2% against 3.2% (p = 1.000). **Subtask 0 is a built-in negative
+  control** — nothing to inherit, and the two arms agree on 29 of 30 — so the
+  effect appears exactly where the mechanism is and nowhere else. Memory
+  recalls roughly twice as many candidates, in the same wrong places. The
+  p-values are clustered by distinct goal, because the 218 subtasks carry only
+  61 of them and the uncorrected tests overstate themselves badly — §6.63,
+  which is the entry to read before trusting any number here.
+  §6.62.
+- **An instrument that cannot answer its own question.** The 30-episode
+  development subset has 218 subtasks but only **61 distinct goals**, because
+  GOAT-Bench asks for the same object by category, by description and by
+  photograph within one episode. Its power to detect even a 10-point change in
+  success rate is **36.7%**; the full `val_unseen` run reaches 99.4% at 5
+  points. Every null result here is therefore consistent with a real effect
+  too small for this instrument, which is a different claim from "nothing
+  happened". §6.63, §6.64.
 - **A data-availability ceiling.** Of the development subtasks, a large share
   cannot be won by *any* navigator, because the detector never fires on the goal
   — a property of HM3D-Semantics, not of the policy. See
@@ -29,7 +50,7 @@ of what fails** at a reduced operating point. Three results so far:
   no pitch action, 14.2% of subtasks have a goal that cannot be framed from
   anywhere a scoring stop could happen — every `rug` subtask among them. §6.35,
   §6.42.
-- **A per-component failure taxonomy**, with 47 dated findings in
+- **A per-component failure taxonomy**, with 64 dated findings in
   `TECHNICAL_GUIDE.md` §6, each paired with the measurement that produced it,
   **including the hypotheses that turned out to be wrong**.
 
@@ -50,7 +71,7 @@ of what fails** at a reduced operating point. Three results so far:
 
 ```bash
 conda activate goat            # python 3.9, headless habitat-sim
-pytest tests/ -q               # 244 tests, ~25 s, no GPU or scene files needed
+pytest tests/ -q               # 300 tests, ~20 s; 286 need no GPU at all
 python scripts/smoke_test.py   # loads a scene + YOLO + CLIP and steps 100 times
 ```
 
@@ -133,8 +154,11 @@ it. Violating one produces a silently wrong agent, not a crash.
 
 ## Testing
 
-244 tests, about 25 seconds, no GPU, no model downloads, no scene files —
-dependency-injected fakes throughout. The suite pins conventions, which cuts
+300 tests, about 20 seconds. 286 of them need no GPU, no model downloads and no
+scene files — dependency-injected fakes throughout. The other 14 load real YOLO
+and CLIP weights, so run them on a free card: against a GPU already busy with an
+eval they fail with out-of-memory errors that look exactly like regressions
+(§6.53), and `--ignore=tests/test_agent_smoke.py` is the right scope mid-run. The suite pins conventions, which cuts
 both ways: three transform tests once asserted the *wrong* camera convention and
 encoded a serious geometric bug for weeks. A green suite confirms only the
 conventions the tests were written against.

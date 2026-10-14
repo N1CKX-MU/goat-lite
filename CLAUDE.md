@@ -155,8 +155,11 @@ exposed it; violating one produces a silently wrong agent, not a crash.
   Ingestion-side HM3D aliases (`stairs`→`stair`, `kitchen island`→`island`) never change emitted names.
 - **CLIP embeddings are always L2-normalised**, so similarity is a plain dot product. The instance
   DB re-normalises after every running-mean merge.
-- **Detector recall is the binding constraint** (mAP50 ≈ 0.149), which is why `conf` is 0.15, not
-  0.35 — false positives are cheap because VERIFYING re-checks before declaring success.
+- **Detector recall is the binding constraint** (mAP50 0.170 on held-out scenes, recall 0.22), which
+  is why `conf` is 0.15, not 0.35 — false positives are cheap because VERIFYING re-checks before
+  declaring success. The v2 rebuild (§6.59) took mAP50 from 0.128 to 0.170 and recall from 0.17 to
+  0.22; six categories are still at recall 0.00 and three have no val instances at all, which is a
+  property of HM3D-Semantics (§6.57), not of the training.
 
 ## Testing
 

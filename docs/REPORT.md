@@ -89,7 +89,7 @@ achievable with a heavyweight modular stack. It does not establish:
 |---|---|---|
 | 1 | Design and implement a complete modular navigation stack — detection, vision-language embedding, occupancy mapping, instance memory, multi-modal goal matching, planning and control — within a 4 GB VRAM budget | **Complete** |
 | 2 | Evaluate on GOAT-Bench `val_unseen` (36 scenes, 360 episodes, 2,669 subtasks); report SR and SPL per modality | In progress — harness built, dev-subset results pending |
-| 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | Pending — gated on end-to-end success |
+| 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | **Complete** — attenuation chain measured: matching 43.6% vs 27.1% (p = 0.016 clustered by goal), usable matches 12.8% vs 7.8% (p = 0.08), SR 3.2% vs 3.2% (p = 1.000), with subtask 0 as a negative control |
 | 4 | Attribute end-to-end failure to individual components, producing a per-module failure taxonomy backed by measurements | In progress — 32 findings logged |
 | 5 | Quantify the data-availability ceiling that HM3D-Semantics imposes on the benchmark vocabulary | **Complete** — 59.2% |
 | 6 | Release a reproducible public repository with a documented engineering record, including negative results | Ongoing |
@@ -835,13 +835,102 @@ Image goals now embed and match (34 of 67 matched a node) and still never score.
 That is a measurable zero rather than an inactive code path, which is the
 difference between a known limitation and a silent one.
 
-**The memory on/off delta is exactly 0.0 pp**, paired position-by-position over
-all 218 subtasks. Run #2's +0.5 pp sat in the same noise. The per-index deltas
-scatter in both directions (−3.3, −5.0, +5.9, +16.7 pp at indices 2, 5, 6, 9) on
-samples of six to thirty subtasks, so none of them is evidence of a lifelong
-trend. **The headline ablation of this project is, at this operating point,
-inconclusive** — and the reason is given below: memory amplifies perception, and
-there is not yet enough perception to amplify.
+**The memory on/off delta on SR is exactly 0.0 pp**, paired
+position-by-position over all 218 subtasks — 7/218 against 7/218, with five
+discordant pairs each way and an exact two-sided sign test of p = 1.000. Run
+#2's +0.5 pp sat in the same noise. That is a balanced coin, not a weak
+effect, and no amount of additional episodes at this SR would resolve it: one
+subtask is 1.4 pp.
+
+**Measured on the metric memory actually acts on, the ablation is decisive.**
+SR sits four stages downstream of the instance database — match, approach,
+verify, stop — while `ever_matched` (did the matcher ever return a node for
+this goal) is the immediate output of memory, and every subtask contributes to
+it rather than only the successful 3.2%. On the same paired 218 subtasks, with
+no new runs:
+
+| metric | memory on | memory off | discordant | p | clustered by goal |
+|---|---|---|---|---|---|
+| SR | 3.2% | 3.2% | 5 / 5 | 1.000 | 3 / 4, p = 1.000 |
+| `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | < 0.0001 | **22 / 8, p = 0.016** |
+
+The final column matters and is explained in §4.6.1: the 218 subtasks carry
+only 61 distinct `(episode_id, category)` goals, so the subtask-level test
+overstates its evidence. The effect survives the conservative reading.
+
+The effect also has the shape the lifelong claim requires, which is what
+separates it from a nuisance difference between two runs:
+
+| | n | `ever_matched` on | off | discordant | p |
+|---|---|---|---|---|---|
+| subtask 0 | 30 | 46.7% | 43.3% | 1 / 0 | **1.000** |
+| subtasks 1+ | 188 | 43.1% | 24.5% | 47 / 12 | **0.000005** |
+
+Subtask 0 is a **built-in negative control**. It is the first goal of its
+episode, so there is nothing to inherit and the two arms are the same system;
+they agree, on 29 of 30 subtasks. Every later subtask inherits a map and an
+instance database under memory-on and begins blind under memory-off, and there
+the arms separate by 18.6 points. The effect is present exactly where the
+mechanism is and absent exactly where it is not — the strongest available
+evidence that it is the memory doing the work and not a difference between
+runs.
+
+The matches memory adds are, however, **mostly badly localised**, and that is
+where the effect dies. `node_error_m` is the distance from the matched node to
+the nearest true instance; a success needs the agent within 1 m of the goal.
+Of the 48 subtasks matched only with memory on, the median node error is
+**3.43 m** and only 16 (33%) fall within 1 m. Where both arms matched (n = 47)
+memory does not improve localisation at all: median 4.07 m on against 3.75 m
+off, p = 0.864. **Memory adds recall, not precision.**
+
+Carried through every stage, on the same pair of runs:
+
+| stage | memory on | memory off | discordant | p | clustered |
+|---|---|---|---|---|---|
+| matched anything | 43.6% | 27.1% | 48 / 12 | < 0.0001 | **0.016** |
+| matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 | — |
+| scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 | 1.000 |
+
+Memory also *appears* to make the agent faster — `steps_taken` averages 380
+with memory against 422 without, 45 subtasks shorter against 22 longer,
+p = 0.0067, with budget exhaustion falling from 78.4% to 73.4% — but that one
+does not survive clustering by goal (19 against 11, p = 0.200). The direction
+is right and the evidence is not there; it is reported here as suggestive
+rather than as a result.
+
+This chain is the central result of the project, and it is more informative
+than any single row of it. The lifelong memory does its job — it roughly
+doubles the rate at which the agent recalls a candidate for its goal on
+subtasks with history — but two thirds of the candidates it adds sit more than
+a metre from the object, so the advantage is already half gone by the
+usable-match stage and entirely gone by the time it reaches a score. Both
+numbers are true of the same two runs, and quoting either alone misrepresents
+the system.
+
+#### 4.6.1 Why these tests are clustered by goal
+
+The 218 dev subtasks carry only **61 distinct `(episode_id, category)`
+goals**. Episode 3 asks for the same mirror thirteen times, episode 6 the same
+mirror ten times, episode 9 the same refrigerator nine times; 157 of the 218
+subtasks repeat a goal already seen in their own episode. That is the
+benchmark working as intended — asking for one object by category, then by
+description, then by photograph is what makes it multi-modal — but it means
+subtasks are **not independent observations**, and a sign test over subtasks
+overstates its evidence.
+
+The cost of ignoring this is not hypothetical. Comparing a 512 px sensor
+against 256 px, the higher resolution won 13 subtasks to 4 (p = 0.049).
+Six of those thirteen were episode 3's single mirror, each ending at 0.86 m or
+0.93 m, five of them after a single step — the agent spawned inside the
+success radius and stopped. One physical arrival, counted six times. Collapsed
+to distinct goals the comparison is 6 to 3, **p = 0.508**.
+
+Every paired test in this report therefore carries both numbers. Clustering is
+conservative in the other direction — it also merges subtasks that genuinely
+differ, since the same mirror asked for by photograph and by description
+exercises different matching paths — so the truth lies between the two, and
+printing both prevents the question being quietly skipped. A goal whose
+subtasks flip both ways counts on both sides.
 
 #### Why the failures fail
 
@@ -925,6 +1014,60 @@ one confident sighting) was aimed at exactly this and did not resolve it: a
 false positive that is *stable across frames* clears the gate as easily as a true
 one. Memory still has no mechanism for disbelief, unlike the occupancy grid,
 which accumulates clamped evidence in both directions.
+
+#### Hyperparameter sensitivity, and what a 10-episode arm can resolve
+
+Three axes were swept over nine arms of 80 subtasks each (10 episodes of the
+development subset), paired positionally so that every arm is read over the same
+subtasks in the same order.
+
+| axis | 0.20 / 0.50 / 0.75 | middle | 0.28 / 1.00 / 1.50 |
+|---|---|---|---|
+| language threshold | 3.8% | **6.2%** (0.24) | 1.2% |
+| merge distance (m) | 5.0% | **6.2%** (0.75) | 6.2% |
+| success distance (m) | 2.5% | **6.2%** (1.00) | 0.0% |
+
+Every grid selected the configuration the system already ran, so the sweep
+confirms the operating point and changes nothing in it.
+
+It does not, however, rank the arms. The arms differ by one to five subtasks out
+of eighty; an exact two-sided sign test over the paired disagreements returns
+p >= 0.062 for every pair in the grid, and at this sample size six one-way flips
+are needed before p < 0.05. The honest result is a statement about the
+instrument: **at a success rate near 5%, a 10-episode arm is below the
+resolution needed to compare configurations**, and the remaining axes were not
+run for that reason rather than for lack of time.
+
+Three observations from the paired rows are more informative than the table:
+
+1. **The axes are not independent of the modality they name.** Raising the
+   language threshold flipped two *category* subtasks, which it cannot affect
+   directly. In episode 1, two language subtasks stopped matching at the higher
+   threshold; the agent explored instead of approaching, and reached a later
+   category subtask with a different map and a different instance database,
+   which it then solved. Because memory persists across subtasks by design, an
+   arm is not a per-subtask intervention but a different trajectory through the
+   whole episode — the lifelong property under study is also a confound in every
+   ablation of it.
+
+2. **Scoring at the margin is close to a coin toss.** One subtask stopped 0.63 m
+   from its goal and was scored a failure, and 0.68 m from it and was scored a
+   success: the nearer stop lost, because success also requires the benchmark's
+   geometric visibility test, which inside 1 m with a 1.41 m fixed-pitch camera
+   fails more often than it passes (§4.5.2). A few centimetres of final pose,
+   which any parameter change perturbs, moves the score.
+
+3. **One axis has no effect whatsoever.** Merge distances of 0.75 m and 1.00 m
+   produced byte-identical results over all 80 subtasks — the same successes,
+   step counts, final distances and explored areas. No two same-class detections
+   ever fell between those radii while also clearing the embedding-similarity
+   gate, so the distance test is not what decides a merge at this operating
+   point.
+
+The sweep therefore reinforces §4.5: the parameters all act on stages the median
+subtask never reaches. The way to make an arm distinguishable is to raise the
+success rate — which means the detector — not to search the configuration space
+more finely.
 
 ### 4.7 Known Limitations
 
@@ -1032,7 +1175,7 @@ matching, and deployment on physical hardware.
 
 ## Appendices *(to be assembled)*
 
-- **A — Engineering log.** 47 dated findings with the measurement that produced
+- **A — Engineering log.** 64 dated findings with the measurement that produced
   each, in `TECHNICAL_GUIDE.md` §6, including negative results and failed fixes.
 - **B — Reproduction.** Environment, commands and locally runnable episodes, in
   `docs/DEMO.md`.

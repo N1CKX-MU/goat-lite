@@ -82,6 +82,22 @@ class TestMapping:
             assert m[key] == d[key], key
 
 
+class TestSim:
+    def test_matches_habitat_env_defaults(self, cfg):
+        """The sensor size is a measured hyperparameter, not a detail: the
+        detector scores 0.1318 mAP50 at 512 and 0.0867 at 256 (6.60)."""
+        from src.sim.env import HabitatEnv
+        d = _defaults(HabitatEnv.__init__)
+        assert tuple(d["resolution"]) == (cfg["sim"]["resolution"],) * 2
+
+    def test_the_square_sensor_assumption_holds(self, cfg):
+        """make_intrinsics takes width and height separately, but the YAML
+        records one number. That is only honest while the sensor is square."""
+        from src.sim.env import HabitatEnv
+        w, h = _defaults(HabitatEnv.__init__)["resolution"]
+        assert w == h
+
+
 class TestPerception:
     def test_matches_detector_defaults(self, cfg):
         from src.perception.detector import YOLODetector
@@ -180,3 +196,33 @@ class TestAgent:
         # into the range where the detector is blind and framing fails.
         commit_m = frac * cfg["agent"]["success_distance"]
         assert commit_m - 0.25 > 0.3
+
+
+class TestSweepAxes:
+    """PLAN.md Section 7.10's planner and exploration axes (added 2026-10-13)."""
+
+    def test_matches_the_agent_axis_defaults(self, cfg):
+        from src.agent.goat_agent import GoatAgent
+        d = _defaults(GoatAgent.__init__)
+        a = cfg["agent"]
+        assert a["planner"] == d["planner"]
+        assert a["frontier_strategy"] == d["frontier_strategy"]
+        assert a["frontier_seed"] == d["frontier_seed"]
+
+    def test_the_documented_defaults_are_the_measured_ones(self, cfg):
+        """Every number in the engineering log was taken with A* and the
+        size/(distance+1) frontier rule. If the YAML's defaults drift, the log
+        stops describing the configuration it was measured under."""
+        assert cfg["agent"]["planner"] == "astar"
+        assert cfg["agent"]["frontier_strategy"] == "nearest-largest"
+
+    def test_the_named_strategy_is_one_the_code_accepts(self, cfg):
+        from src.planning.exploration import FRONTIER_STRATEGIES
+        assert cfg["agent"]["frontier_strategy"] in FRONTIER_STRATEGIES
+
+    def test_the_configured_encoder_can_actually_load(self, cfg):
+        """A model name nothing can load is the 6.46 failure: the arm runs,
+        fails per scene, and reads as a result."""
+        from src.perception.encoder import validate_encoder
+        e = cfg["perception"]["encoder"]
+        validate_encoder(e["model_name"], e["pretrained"])

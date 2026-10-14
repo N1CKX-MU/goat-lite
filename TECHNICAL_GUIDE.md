@@ -3130,3 +3130,695 @@ next measurement that matters is the **in-radius detector ceiling** (6.35, 6.32)
 how many of the 218 subtasks are winnable at all by any navigator carrying this
 detector. Until that number exists, agent changes are guesses about headroom
 that may not be there.
+
+#### 6.52 Three of Week 10's ablations could not be selected at all
+
+2026-10-13. PLAN.md 7.10 lists seven ablation axes. Four were reachable as
+flags; **three were not reachable at any price**: the planner and the frontier
+scoring rule were hard-coded inside `GoatAgent`, and the encoder was only
+reachable by editing `ClipEncoder`'s defaults. Nothing failed -- the sweep would
+simply have reported a complete-looking table that silently omitted them, which
+is 6.46 and 6.49's failure mode applied to the experiment design rather than to
+a feature.
+
+Three findings came out of wiring them, in increasing order of importance.
+
+**`MobileCLIP-S0` does not exist in open_clip 3.3.0.** 7.10 names it for the
+encoder ablation. `open_clip.list_models()` offers `MobileCLIP-S1`, `-S2`, `-B`
+and `MobileCLIP2-S0`; there is no plain `-S0`. That arm could never have run,
+and would have failed *per arm, after loading a scene and a detector*, with
+open_clip's own error. `validate_encoder()` now checks the
+(architecture, weights) pairing against `list_pretrained()` before anything
+expensive loads and names the near misses. The grid uses
+`MobileCLIP2-S0/dfndr2b` as the nearest equivalent.
+
+**`plan_fmm` returns None when skfmm is missing**, which the agent cannot
+distinguish from "no path exists". An FMM arm on a machine without skfmm would
+end every subtask in `no_plan` and read as a *planner result* -- a dramatic,
+entirely false one. `resolve_planner("fmm")` now raises at build time instead.
+skfmm 2025.01.29 is installed here, so the arm is genuinely runnable; the guard
+is for the Kaggle machine, where it is one `pip install` away from silently
+fabricating a finding. (`requirements.txt` already carries a comment warning of
+exactly this, which is how it was spotted.)
+
+**An unseeded random control is not an experiment.** The `random` frontier rule
+is the useful arm -- if it ties the scored rules, frontier choice is not what
+limits the agent -- but only if it can be re-run. It takes a seeded Generator.
+
+A test asserts that the visited-frontier blacklist is honoured under *every*
+strategy, because that retirement is what stops the agent oscillating between
+two frontiers for a whole budget, and it would be easy to drop while adding a
+branch.
+
+#### 6.53 Concurrency on this card is capped by throughput, not VRAM
+
+2026-10-13. Established earlier that 1.9 GB per eval process against 6 GB
+allowed three concurrent runs. Measured with three actually running:
+
+| concurrent eval processes | s per episode, each | aggregate episodes/s |
+|---|---|---|
+| 2 (run #3) | 114 | 0.0175 |
+| 3 (sweep) | ~175 | 0.0171 |
+
+**Adding the third process bought nothing.** Per-process time rose by the same
+factor the count did, so aggregate throughput is flat -- within noise, slightly
+worse. VRAM was the wrong constraint to plan against: at three processes the
+card sat at 4.9 of 6 GB but only 52% utilisation, and the limit is compute and
+IO contention. Two is the useful degree of parallelism here, and a nine-arm
+sweep is about two hours whatever the arrangement.
+
+Two practical consequences. Scheduling more processes because memory fits is
+not a speedup, and **running the GPU test suite during an eval is actively
+harmful**: `tests/test_agent_smoke.py` loads real YOLO and CLIP weights, and
+doing so against a card at 4.9 GB produced eight CUDA out-of-memory failures
+that look exactly like regressions. Scope to `--ignore=tests/test_agent_smoke.py`
+while an eval is running; the other 254 tests need no GPU at all.
+
+#### 6.54 The 10-episode sweep cannot resolve any axis it was built to test
+
+*2026-10-14.* PLAN.md Section 7.10's grid, run over three axes at
+`--n-episodes 10` (80 subtasks per arm, nine arms, about two hours wall time
+with two concurrent processes):
+
+| axis | arm | SR | SPL | matched | median final dist |
+|---|---|---|---|---|---|
+| `--language-threshold` | 0.20 | 3.8% (3/80) | 0.036 | 52.5% | 4.44 m |
+| | **0.24** | **6.2% (5/80)** | 0.056 | 46.2% | 5.00 m |
+| | 0.28 | 1.2% (1/80) | 0.013 | 31.2% | 4.11 m |
+| `--merge-dist` | 0.50 | 5.0% (4/80) | 0.044 | 46.2% | 5.00 m |
+| | **0.75** | **6.2% (5/80)** | 0.056 | 46.2% | 5.00 m |
+| | 1.00 | 6.2% (5/80) | 0.056 | 46.2% | 5.00 m |
+| `--success-distance` | 0.75 | 2.5% (2/80) | 0.019 | 45.0% | 4.36 m |
+| | **1.00** | **6.2% (5/80)** | 0.056 | 46.2% | 5.00 m |
+| | 1.50 | 0.0% (0/80) | 0.000 | 43.8% | 4.74 m |
+
+The bolded arms are the configuration already in the code. **The sweep selects
+the running defaults in all three grids, and that is the whole of what it
+establishes.** Every arm is paired positionally against the others over the
+same 80 subtasks, in the same order, with `(episode_id, subtask_index,
+category, modality)` checked identical row by row. An exact two-sided sign test
+over the paired disagreements:
+
+| pair | wins | losses | p |
+|---|---|---|---|
+| lang024 vs lang028 | 4 | 0 | 0.125 |
+| sd100 vs sd150 | 5 | 0 | 0.062 |
+| sd075 vs sd100 | 0 | 3 | 0.250 |
+| merge050 vs merge075 | 0 | 1 | 1.000 |
+| merge075 vs merge100 | 0 | 0 | 1.000 |
+
+Nothing reaches p < 0.05, and nothing can: at n = 80 one subtask is 1.25 pp,
+and a two-sided sign test needs **six one-way flips** before p < 0.05. The
+largest disagreement anywhere in the grid is five. The arms differ by one to
+five subtasks out of eighty, which at this success rate is the resolution floor
+of the instrument, not a measurement of the parameter.
+
+Two mechanisms make it worse than the arithmetic suggests, and both are visible
+in the rows:
+
+**Axes leak across modalities through the persistent memory.** Raising the
+language threshold from 0.20 to 0.24 flipped two *category* subtasks, which
+that parameter cannot touch directly. Episode 1 subtasks 3 and 5 are language
+goals that matched at 0.20 and stopped matching at 0.24; the agent therefore
+spent those two subtasks exploring instead of approaching, and arrived at
+subtask 7 -- a category goal -- with a different map and a different instance
+database. Subtask 7 then succeeded. The lifelong property under test is also a
+confound in every sweep: an arm is not a per-subtask intervention, it is a
+different trajectory through the whole episode.
+
+**A flip can be a visibility coin-toss at the final pose.** Episode 8 subtask 2
+stopped 0.63 m from the goal and was scored a failure at 0.20, and 0.68 m from
+it and scored a success at 0.24. The nearer stop lost. Success needs the
+benchmark's geometric visibility test as well as the radius, and inside 1 m
+with a 1.41 m camera and no pitch action that test is close to a coin toss
+(6.35, 6.42) -- so a few centimetres of final pose, which any parameter change
+perturbs, moves the score.
+
+Note also that one of the five successes in the winning arm is accidental:
+episode 1 subtask 7 succeeded with `node_error_m` of 3.83, meaning the agent was
+approaching a memory node 3.83 m from any true instance and happened to stop
+within 1 m of one with it in frame.
+
+The useful conclusion is about the instrument, not the hyperparameters. **With
+SR near 5%, a 10-episode arm cannot rank configurations**, and the ~24-arm grid
+Section 7.10 lists would cost about a day and a half of GPU to produce the same
+non-answer. Ranking at this operating point needs either the full 218-subtask
+subset per arm (about an hour each, so a three-arm axis is an afternoon) or a
+metric with more resolution than success -- `ever_matched` (46-52% here) and
+`node_error_m` respond to the matcher axes with ten times the sample size,
+because every subtask contributes. Section 7.10's gate is recorded as not
+resolvable at the configured sweep size rather than as a result.
+
+#### 6.55 Merge distance above 0.75 m is inert: the two arms are bit-identical
+
+*2026-10-14.* `--merge-dist 0.75` and `--merge-dist 1.00` did not differ in one
+field of one row across 80 subtasks -- same successes, same step counts, same
+final distances, same `node_error_m`, same explored area. Not "within noise":
+`diff` of the two `results.csv` files is empty.
+
+So in 80 subtasks of real scenes, **no two same-class detections ever landed
+between 0.75 m and 1.00 m apart** while also clearing the 0.85 CLIP similarity
+gate. The distance test is not what decides a merge at this operating point;
+the class and embedding gates bind first, and back-projected centres of the same
+instance cluster well inside 0.75 m. Dropping to 0.50 m changed exactly one
+subtask.
+
+Two consequences. The merge radius is not worth sweeping again -- it has no
+measurable lever arm -- and if instance fragmentation is ever suspected as a
+failure cause, the thing to loosen is `merge_embed_sim`, not `merge_dist_m`.
+
+#### 6.56 A 401 body written into the target file shifted a 27 GB archive by 56 bytes
+
+*2026-10-14.* The HM3D train scenes finished downloading at 27846 MB. Two
+checks disagreed about whether it was usable, and the disagreement is the
+finding.
+
+**My own completeness check was wrong first.** It tested the end-of-archive
+marker with `tail -c 1024 file | od -An -tx1 | tr -d ' \n' | grep -qE '^0*$'`
+and reported the archive truncated. GNU `od` **collapses runs of identical
+output lines into a single `*`**, so 1024 zero bytes render as one zero line
+plus `*`, and the regex rejected it. `tail -c 1024 file | tr -d '\000' | wc -c`
+returns 0 — the trailer was there all along. Third instance of a tool's
+convenience formatting changing the thing being measured (6.46, and the
+`pgrep -f` watcher that matched itself).
+
+The archive was damaged, though, in a way that neither check describes. `tar
+-tf` listed 2399 members and then failed with "This does not look like a tar
+archive"; Python's `tarfile`, which does not resynchronise, failed on the
+**first** header with `bad checksum`. The first 56 bytes of the file are:
+
+```
+{"code":"request.unauthorized","message":"Unauthorized"}
+```
+
+A 401 from the CDN arrived as a JSON body, and curl wrote that body into the
+target `.tar`. The next attempt's `-C -` then computed its resume offset from
+what was on disk — 56 bytes — and asked the server for byte 56 onward. So the
+file is the error message followed by `real_archive[56:]`: **every byte after
+the first 56 is correctly placed, and the first 56 are gone.** This is 6.19's
+mechanism inverted. There, a retry restarted at byte 0 and discarded 13 GB of
+good data; here a retry resumed past garbage and kept it.
+
+What makes it dangerous is how well it imitates success. The file is the right
+size, it has a valid end-of-archive trailer, `tar` recovers by resynchronising
+and lists 2399 of 2400 members, and GNU `tar -xf` would extract all 1600 files
+and exit nonzero at the end with a message about one bad header. The damage is
+confined to the first member's name field, because a tar header is 512 bytes
+and the clobbered span is only the first 56 of them.
+
+The name was recoverable, and recovering it *proves* the rest of the block is
+intact. A tar header's checksum covers its own 512 bytes with the checksum
+field blanked. Writing the only candidate the listing allows,
+`00000-kfPV7w3FaU5/`, into bytes 0-99 makes the computed checksum equal the
+stored `012201` exactly. Reconstructing those 56 bytes on the fly, without
+modifying the file:
+
+```bash
+{ python -c "import sys;sys.stdout.buffer.write(b'00000-kfPV7w3FaU5/'+b'\0'*38)"
+  tail -c +57 data/hm3d-train-habitat.tar
+} | tar -tf -
+```
+
+gives `exit 0`, **2400 members, 800 `.basis.glb`, 800 `.basis.navmesh`, 800
+directory entries, empty stderr**. The download is complete; only one directory
+entry's header was ever damaged, and a directory entry carries no payload.
+
+Two guards are now in `scripts/setup_hm3d.sh`, because the semantics and
+configs tars are downloaded the same way:
+
+- `quarantine_bad_partials` runs **before every attempt, including the first**,
+  and moves any `*.tar` without `ustar` at byte 257 to `<name>.rejected`. An
+  error body is far too short to have a byte 257, so this catches the poison
+  while it is still 56 bytes, and the retry then starts from byte 0. It moves
+  rather than deletes: the bytes are the evidence.
+- `first_header_intact` validates the first header's checksum after the
+  downloads, which is the check that catches an archive already resumed past an
+  error body — the state this one was in.
+
+Both were tested against the real damaged file and against a synthetic 56-byte
+error body.
+
+The reason the first request was unauthorized is not recorded; the downloader's
+log predates this session's context. It matters only that an HTTP error body is
+a plausible thing to find at the head of any resumable download, and that
+`-C -` will happily build on it.
+
+**Consequence, same day.** Running `setup_hm3d.sh --train` after extracting the
+scenes by hand failed twice on `hm3d_train_habitat_v0.2` with
+
+```
+tarfile.ReadError: file could not be opened successfully
+```
+
+habitat's downloader does not only fetch. Finding a complete tar on disk it
+skips the transfer and goes straight to **extracting** it, with Python's
+`tarfile` — which is the one reader that does not resynchronise past a bad
+header. So the damaged header turned an already-satisfied uid into six
+scheduled retries, each one attempting to produce 800 scenes that were already
+on disk. It did not re-download the 27.8 GB, but only because the file was the
+right size.
+
+`uid_satisfied()` now short-circuits a uid whose payload is present (800
+`.basis.glb`, 145 `.semantic.glb`, or the annotated config), and `--uids`
+selects a subset explicitly. The general lesson is that "already downloaded"
+and "already usable" are different states, and a downloader that extracts will
+act on the difference.
+
+Worth noting what the denial of an in-place repair cost and saved. Repairing
+the 56 bytes would have made habitat's own tooling able to read the archive;
+not repairing it meant finding out that habitat's tooling tries to. The scenes
+are extracted either way, so the tar is now only a backup, and the skip is the
+fix that generalises.
+
+#### 6.57 A scene-level split stranded a goal category the detector is scored on
+
+*2026-10-14.* The 150-frame rebuild rendered 14862 images and 57634 boxes, 2.49x
+the previous build's 5971 / 23177 — exactly the ratio the frame raise predicts.
+Per-class counts then showed something the totals hide:
+
+| class | train boxes | val boxes |
+|---|---|---|
+| christmas tree | **0** | 8 |
+| shower glass | 7 | 0 |
+| exercise bike | 44 | 0 |
+| freezer | 20 | 1 |
+
+`christmas tree` is annotated in **exactly one** of the 145 annotated train
+scenes. The split is by scene at `--val-frac 0.1`, and seed 42 put that scene
+in val. So the class had no training data at all, **and was still scored**: mAP50
+averages over classes, so a class the split had made unlearnable contributed
+recall 0.00 to the headline number. Some part of the 0.149 that this whole
+rebuild is meant to improve was an artifact of the split, not of the detector.
+
+It matters beyond the metric. `christmas tree` is **7 of the 218 dev subtasks**
+(3.2%) and 18 of the 2669 in full `val_unseen`.
+
+`stratified_scene_split()` now decides the split: a scene may move to val only
+while every class it carries still has a scene left in train. Train wins ties,
+because a class present in one scene cannot be in both and having it in train
+is strictly better than having it only in val; if the requested fraction cannot
+be reached without stranding something, it returns fewer val scenes. Scene
+contents come from each scene's `semantic.txt` rather than from habitat, since
+the split has to be decided before any rendering starts. On the real corpus at
+seed 42 it takes classes with a train scene from **35/36 to 36/36**, and it
+does so by changing exactly one scene: the naive shuffle picks val scenes
+`{18, 30, 38, 51, 71, 81, 88, 110, 112, 120, 130, 133, 137, 141}` and the
+stratified walk refuses 141 — the sole `christmas tree` scene — taking 82
+instead. 13 of the 14 are shared. An earlier version of this entry said the
+two splits chose the same 14 scenes, which was wrong; the one swap is the whole
+mechanism.
+
+Worth recording because it bit later: the dataset `checkpoints/yolo_goat.pt`
+was trained on in August used neither of these. `val_scenes = set(range(n_val))`
+took the first 14 scenes in sorted order, a prefix split. That one happens to
+strand nothing — the `christmas tree` scene is index 141, nowhere near the
+front — so the stranding is a property of shuffling, not of splitting by scene.
+
+Two things this does not fix, and they are the real ceiling. `christmas tree`
+still has one instance, so it is unlearnable from HM3D-Semantics whichever
+split it lands in — the fix stops it corrupting the metric, not the data.
+And the goal distribution is badly matched to the annotation supply:
+
+| goal category | subtasks in full val_unseen | train instances |
+|---|---|---|
+| mirror | 483 | 841 |
+| refrigerator | 464 | 124 |
+| picture | 325 | 3081 |
+| microwave | 132 | 105 |
+| piano | 43 | 17 |
+| christmas tree | 18 | 1 |
+
+`refrigerator` is 17.4% of all `val_unseen` goals against 124 instances in 91
+scenes. Across the categories under 20 instances, about **4% of subtasks cannot
+be won by any detector trained on this data**, which belongs with 6.32 and 6.35
+as a data-availability ceiling rather than a policy failure.
+
+Separately, writing into a populated output directory was silent train/val
+contamination: frames are named `<scene_index>_<frame>.jpg`, so when the split
+changes the previous run's copy of a scene stays behind on the other side and
+the same image appears in both halves. `--out` now refuses a non-empty
+directory unless `--force` is given. Caught before it happened, while preparing
+to re-render over the first build.
+
+#### 6.58 The finetuner threw away a 48-epoch run because `project` is not a path
+
+`finetune_yolo.py` composed the export source itself:
+
+```python
+best = os.path.join(args.project, args.name, "weights", "best.pt")
+if not os.path.exists(best):
+    raise SystemExit(f"Training finished but {best} not found.")
+```
+
+The 60-epoch v2 run trained for 48 epochs, early-stopped on `patience=15`,
+re-validated, printed its per-class table, and then exited 1 with *Training
+finished but runs/goat_yolo/finetune_v2/weights/best.pt not found*. The weights
+were on disk the whole time, at
+`runs/detect/runs/goat_yolo/finetune_v2/weights/best.pt`.
+
+`project` is not a filesystem path to ultralytics. It resolves it against the
+`runs_dir` key in its own `settings.yaml`, which defaults to `runs/detect`, so
+`project="runs/goat_yolo"` lands at `runs/detect/runs/goat_yolo`. Composing the
+path only works when `runs_dir` happens to be `.`. Nothing was lost — the run
+had already written `best.pt` and `last.pt` — but an unattended two-hour job
+reported failure after succeeding, which is the kind of exit code that gets a
+run relaunched.
+
+`resolve_best_weights()` now asks the trainer where it wrote, in order:
+`trainer.best`, then `trainer.save_dir/weights/best.pt`, then the composed path
+as a last resort, skipping any candidate that does not exist and naming all
+three in the error if none do. `os.fspath` because `save_dir` is a `pathlib.Path`.
+`tests/test_finetune_paths.py` pins all six cases.
+
+This is the same shape as 6.46 and the self-matching `pkill` patterns: a check
+written against an assumption about someone else's path convention, which
+reports a false negative rather than a crash.
+
+#### 6.59 The detector rebuild is a real improvement, measured four ways
+
+v2 of the detector — 150 frames/scene instead of 60, 145 annotated scenes,
+stratified split, 14905 images / 57272 boxes — trained 48 of 60 epochs
+(early-stopped, best at epoch 33) at 119 s/epoch.
+
+Neither checkpoint has an uncontaminated common test set: `split_v1` is a
+prefix split (scenes 0000–0013) and `split_v2` is the stratified one
+(`{18, 30, ... 137}`), and each model trained on the other's val scenes. So all
+four combinations were measured rather than one:
+
+| weights | on `split_v1` | on `split_v2` |
+|---|---|---|
+| v1 (`yolo_goat_v1_map0149.pt`) | **0.1276** (clean) | 0.1467 (trained on these scenes) |
+| v2 (`yolo_goat_v2.pt`) | 0.2046 (trained on these scenes) | **0.1700** (clean) |
+
+mAP50; mAP50-95 is 0.0833 / 0.0966 / 0.1367 / 0.1093 in the same order.
+
+The comparison that matters is the diagonal: **v2's clean 0.1700 against v1's
+clean 0.1276, +33% relative.** And it holds the hard way round too — v2's clean
+score beats v1's *contaminated* score (0.1467), so no assumption about which
+scenes August's build held out can reverse it. Recall, which 6.32 identifies as
+the binding constraint, goes 0.167 → 0.245 on `split_v1` and 0.177 → 0.217 on
+`split_v2`.
+
+The 0.149 quoted throughout this document and in `CLAUDE.md` came from the
+training-time `results.csv` of the August run at its best epoch. Re-validating
+the exported `best.pt` today on a 2.5× denser rendering of the same held-out
+scenes gives 0.1276. The figure was never wrong about the run; it was a
+best-epoch number from a different val rendering, and is not comparable to a
+re-validation. 0.1276 is the number to compare against.
+
+What the extra frames bought, per class on `split_v2`: `boiler` 0.528 mAP50
+from 10 val images, `nightstand` 0.342, `radiator` 0.345, `flower vase` 0.219,
+`island` 0.267 — all classes that 6.52 recorded at or near zero. `picture`
+reaches 0.647 and `mirror` 0.413, the two highest-demand goal categories.
+
+What it did not buy, and the reason is 6.57's ceiling rather than the training:
+`footrest`, `glass`, `parapet`, `photo`, `piano` and `statue` are still at
+recall 0.00, each with 6–22 val instances. And three classes — `christmas tree`,
+`shower glass`, `exercise bike` — have **zero val instances**, so they are
+absent from the per-class table entirely. The stratified split guarantees every
+class a *train* scene; it says nothing about val. `christmas tree` now has 14
+train boxes instead of 0, which is what 6.57 was for, but there is still no
+measurement of whether the detector learned it.
+
+#### 6.60 The agent's 256 px sensor throws away more detector than retraining added
+
+The v2 detector was validated at `imgsz=512`, the size it was trained at. The
+agent's RGB sensor is 256×256 (`env.py:70`). Running both checkpoints over both
+val splits at both sizes, all at the agent's `conf=0.15`:
+
+| | `split_v1` | `split_v2` |
+|---|---|---|
+| v1 @256 | 0.0650 | 0.0774 |
+| v1 @512 | 0.0994 | 0.1145 |
+| v2 @256 | 0.1206 | 0.0867 |
+| v2 @512 | 0.1695 | 0.1318 |
+
+mAP50. (These are lower than 6.59's table, which used ultralytics' default
+`conf=0.001`; the comparison within this table is self-consistent.)
+
+Two things fall out. The first is reassuring: **v2 beats v1 at both sizes**, by
+the same +33% on the clean diagonal — 0.0650 → 0.0867 at 256, 0.0994 → 0.1318
+at 512. The retraining gain is not an artifact of validating at 512, and the
+promotion stands.
+
+The second is not. **Halving the input costs ~34% of mAP50 for both models**,
+which is larger than the entire v2 improvement. Stated the damaging way round:
+`v1 @512` (0.0994) beats `v2 @256` (0.0867). The old detector at the training
+resolution outperforms the new detector at the agent's resolution. Whatever the
+detector weights are, the sensor is throwing away more than the weights can
+make back.
+
+Note this is not fixed by the detector's `imgsz=512` default — it upsamples a
+256 px frame to 512 at inference, which cannot restore detail the renderer
+never produced. The information is lost at render time.
+
+`run_dev_eval.py` grew `--resolution` so the lever is testable; every
+geometric consumer already derives its intrinsics from the frame size
+(`make_intrinsics(hfov, w, h)`), and `tests/test_sensor_resolution.py` pins
+that — focal length scales, the principal point stays centred, and a pixel at
+the same fractional position back-projects to the same ray at 256 and 512. The
+cost is 4× the pixels per step; on this card the dev eval sits at 10% GPU
+utilisation and 2.0 GB of 6.1 GB, so it is sim-bound rather than
+GPU-bound (consistent with 6.53) and there is headroom to pay it.
+
+Also added: `save_results(..., config=...)` writes the resolved run
+configuration into `summary.json`. Today's three sweep grids produced output
+directories that were indistinguishable from their contents — `results.csv`
+carries no `scene_id` and `summary.json` carried no settings — so the arms had
+to be told apart by directory name and paired positionally (6.54). Any run
+from here on says what produced it.
+
+#### 6.61 A 33% better detector buys no significant SR at 256 px
+
+The full 30-episode dev subset on the v2 detector, paired against the v1
+baseline (`dev_eval_run3_memon`) on all 218 subtasks with the row identity
+verified rather than assumed:
+
+| | v1 | v2 | discordant | exact two-sided sign test |
+|---|---|---|---|---|
+| SR | 3.2% (7/218) | 4.6% (10/218) | 7 to v2, 4 to v1 | **p = 0.549** |
+| `ever_matched` | 43.6% | 46.8% | 32 to v2, 25 to v1 | p = 0.427 |
+| `detector_in_view` | 13.3% | 18.8% | 29 to v2, 17 to v1 | p = 0.104 |
+| final distance (median) | 4.66 m | 4.24 m | 85 closer, 81 farther | p = 0.816 |
+
+**Nothing is significant.** SR rose by 1.4 points, which at this n is three
+subtasks, and the sign test says that is what noise looks like. By modality:
+category 4.9% → 6.2%, language 4.3% → 5.7%, image 0.0% → 1.5%.
+
+This is worth stating sharply because the detector really did improve: +33%
+mAP50 and +47% recall on held-out scenes (6.59), measured, replicated at both
+input sizes. The agent cannot convert it. That is the same shape as 6.50 — the
+fixes work and SR barely moves — and it is now the third time a measured
+component-level gain has failed to reach the end-to-end metric.
+
+The ordering of the p-values is the useful part. `detector_in_view` (p = 0.10)
+is the metric closest to the detector and moved most; `ever_matched` (p = 0.43)
+is one stage downstream and moved less; SR (p = 0.55) and final distance
+(p = 0.82) are furthest away and did not move at all. The signal attenuates
+with every stage between the detector and the score, which locates the
+bottleneck *after* perception rather than in it.
+
+6.60 supplies the likely reason the detector gain is this small in situ: at the
+agent's 256 px sensor the v2 detector scores 0.0867 mAP50, below what v1 scored
+at 512. The retraining is real but the sensor is spending it.
+
+Do not read this as "the rebuild was wasted". The v2 weights are better by
+every offline measure and strictly dominate v1 at both input sizes, so they are
+the right thing to carry into any later configuration — including a 512 one,
+where the gain is nearly twice as large in absolute terms (0.0994 → 0.1318
+versus 0.0650 → 0.0867). It is the 256 px pipeline that cannot spend it.
+
+#### 6.62 Memory works, and the proof was already in Week 9's data
+
+Week 10's third done criterion — "memory on-vs-off delta computed and > 0" —
+has been recorded as failed since the memory ablation was run, because the
+delta on SR is **exactly 0.0 pp**: 7/218 against 7/218, five discordant each
+way, sign test p = 1.000. That is a perfectly balanced coin, not a weak
+effect.
+
+The criterion was measured on the wrong metric. SR is four stages downstream
+of anything memory touches, and at 3.2% one subtask is 1.4 pp. `ever_matched`
+— did the matcher ever return a node for this goal — is the metric memory
+actually acts on, and every subtask contributes to it. On the same paired
+218 subtasks, no new runs:
+
+| metric | memory on | memory off | discordant | p | clustered (6.63) |
+|---|---|---|---|---|---|
+| SR | 3.2% | 3.2% | 5 / 5 | 1.000 | 3 / 4, p = 1.000 |
+| `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | p < 0.0001 | **22 / 8, p = 0.016** |
+
+And the effect has the right *shape*, which is what makes it the lifelong
+property rather than a nuisance difference. Split by subtask index:
+
+| | n | `ever_matched` on | off | discordant | p |
+|---|---|---|---|---|---|
+| subtask 0 | 30 | 46.7% | 43.3% | 1 / 0 | **1.000** |
+| subtasks 1+ | 188 | 43.1% | 24.5% | 47 / 12 | **0.000005** |
+
+**Subtask 0 is a built-in negative control.** It is the first goal in its
+episode, so there is nothing to inherit and the two arms are the same system;
+they agree, 1 discordant pair out of 30. Every subtask after it inherits a map
+and an instance database under memory-on and starts blind under memory-off,
+and there the arms separate by 18.6 points with p = 5e-6. The effect appears
+exactly where the mechanism predicts and is absent exactly where the mechanism
+is absent.
+
+Per index the separation is visible from subtask 1 onward and individually
+significant at 4 (7/0, p = 0.016) and 6 (6/0, p = 0.031), with the rest
+one-way but under-powered at n = 30 or less — consistent with a real effect
+measured 10 times at low n rather than with noise.
+
+**The matches memory adds are mostly badly localised, and that is where the
+effect dies.** `node_error_m` is the distance from the matched node to the
+nearest true instance of the goal; success needs the agent within 1 m. Of the
+48 subtasks matched only with memory on, the median node error is **3.43 m**
+and only 16 (33%) are within 1 m. On the 47 subtasks where both arms matched,
+memory does not improve localisation at all — median 4.07 m on against 3.75 m
+off, 16 closer against 18, p = 0.864. Memory adds recall, not precision.
+
+Carrying that through gives the full attenuation chain on one pair of runs:
+
+| stage | memory on | memory off | discordant | p | clustered |
+|---|---|---|---|---|---|
+| matched anything | 43.6% | 27.1% | 48 / 12 | < 0.0001 | **0.016** |
+| matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 | — |
+| scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 | 1.000 |
+
+Each stage loses the signal the one before it carried. That is the precise
+statement of this project's central difficulty and it is now measured rather
+than argued: **the instance memory does its job — it roughly doubles the rate
+at which the agent recalls a candidate for the goal — but two thirds of the
+candidates it adds are more than a metre from the object, so the advantage is
+already half gone by the usable-match stage and entirely gone by SR.**
+
+**Memory also appears to make the agent faster, but that one does not
+survive scrutiny.** `steps_taken` over the same paired runs: mean 380 with
+memory against 422 without, 45 subtasks finishing in fewer steps against 22 in
+more, p = 0.0067, and the share burning the whole 500-step budget falls from
+78.4% to 73.4%. Clustered to distinct goals as 6.63 requires, it is 19 against
+11 and **p = 0.20**. The direction is right and the evidence is not there.
+Recorded as suggestive, not as a result.
+
+So the criterion is met: the delta is computed and is greater than zero, with
+p < 0.0001 on the metric memory acts on. It should be reported with the chain
+above rather than alone, because 48/12 at p < 1e-4 and 5/5 at p = 1.000 are
+both true of the same two runs, and quoting either without the other
+misrepresents the system. That is the same conclusion 6.61 reached from the
+detector side: both a better detector and a working memory move the
+perception metrics, and neither moves success.
+
+Worth recording as a process point. This result required no GPU and no new
+runs; it is a different aggregation of a file that had been on disk for days,
+found only because 6.61 forced the question of which metric a change should be
+expected to move. The Week 10 section had itself suggested it — "if a sweep is
+wanted before then, run it on `ever_matched` and `node_error_m`, which every
+subtask contributes to, rather than on success" — and the suggestion was not
+applied to the memory ablation it was written next to.
+
+#### 6.63 GOAT-Bench repeats its goals, so every sign test this term overstated itself
+
+The 30-episode dev subset has 218 subtasks. It has **61 distinct
+`(episode_id, category)` goals.** Episode 3 asks for the same mirror
+**thirteen times**; episode 6 asks for the same mirror ten times; episode 9
+asks for the same refrigerator nine times. 157 of the 218 subtasks are a
+repeat of a goal already seen in their own episode.
+
+That is the benchmark working as designed — asking for the same object through
+a category, then a description, then a photo is the whole point of a
+multi-modal benchmark — but it means **subtasks are not independent
+observations**, and every paired sign test run this term has treated them as
+if they were.
+
+It was found by auditing a result that looked too good. The 512 px arm beat
+256 px on success 13 flips to 4, p = 0.049. Six of those thirteen came from
+episode 3, all of them the same mirror, all ending at 0.86 m or 0.93 m, and
+all but one taking a single step — the agent spawned inside the success radius
+and stopped. One physical arrival, counted six times. Collapsed to distinct
+goals the same comparison is 6 against 3, **p = 0.508.**
+
+Re-scored over distinct goals rather than subtasks:
+
+| comparison | metric | subtask-level | goal-level | survives |
+|---|---|---|---|---|
+| memory on/off | `ever_matched` | 48/12, p < 0.0001 | 22/8, **p = 0.016** | **yes** |
+| memory on/off | `steps_taken` | 45/22, p = 0.0067 | 19/11, p = 0.200 | no |
+| memory on/off | SR | 5/5, p = 1.000 | 3/4, p = 1.000 | null either way |
+| 512 vs 256 | `ever_matched` | 38/5, p < 0.0001 | 18/4, **p = 0.0043** | **yes** |
+| 512 vs 256 | `detector_in_view` | 38/7, p < 0.0001 | 19/5, **p = 0.0066** | **yes** |
+| 512 vs 256 | SR | 13/4, p = 0.049 | 6/3, p = 0.508 | no |
+| v2 vs v1 detector | all | p >= 0.10 | p >= 0.29 | no change |
+
+Two claims made earlier today are withdrawn: that resolution significantly
+raises SR, and that memory significantly reduces steps. Both were artifacts of
+counting one goal many times. What survives is the perception layer in both
+cases — memory roughly doubles the rate at which a candidate is recalled
+(p = 0.016) and 512 px does the same for matching and detection
+(p = 0.004, p = 0.007) — and no intervention has yet moved SR.
+
+The clustered column is conservative in the other direction: collapsing by
+`(episode_id, category)` also merges subtasks that genuinely differ, since the
+same mirror asked for by photo and by description exercises different matching
+paths. The truth sits between the two columns, and both are now printed, so
+the question cannot be quietly skipped. A cluster that flips both ways counts
+on both sides rather than being assigned to whichever arm is being argued for.
+
+This also retrospectively strengthens 6.54's conclusion. The Week 10 sweep was
+judged under-powered at n = 80 subtasks; those 80 subtasks carry far fewer
+distinct goals, so the grid was even further below the resolution of the
+instrument than that entry claimed.
+
+#### 6.64 The dev subset has at most 37% power for a 10-point SR change
+
+6.63 established that the unit of evidence is a distinct goal, not a subtask.
+Counting them changes what the development subset can be asked:
+
+| set | episodes | subtasks | distinct `(episode, category)` goals |
+|---|---|---|---|
+| dev subset | 30 | 218 | **61** |
+| full `val_unseen` | 360 | 2669 | **1018** |
+
+Simulating the exact two-sided sign test at alpha = 0.05, over independent
+paired Bernoulli goals:
+
+| metric | true lift | dev (61 goals) | `val_unseen` (1018) |
+|---|---|---|---|
+| SR-like, base 4% | +2 pp | **2.4%** | 51.5% |
+| SR-like, base 4% | +5 pp | **10.4%** | 99.4% |
+| SR-like, base 4% | +10 pp | **36.7%** | 100% |
+| `ever_matched`-like, base 44% | +5 pp | 6.3% | 61.4% |
+| `ever_matched`-like, base 44% | +10 pp | 14.5% | 99.4% |
+| `ever_matched`-like, base 44% | +17 pp | 39.9% | 100% |
+
+**The dev subset cannot see a 10-point swing in success rate more often than
+one time in three.** Every null result recorded this term — the v2 detector
+(6.61), the nine sweep arms (6.54), memory on SR (6.62) — is consistent with a
+real effect of a size that would matter, measured with an instrument that
+cannot resolve it. That is a different statement from "the change did
+nothing", and the project has been making the wrong one.
+
+It also explains the pattern of what *did* reach significance. The surviving
+results are all on `ever_matched` and `detector_in_view`, whose base rates are
+44% and 13% rather than 3%, and whose effects were large: memory's +16.5 pp
+and 512 px's +22.8 pp are near the top of the table above, which is the only
+region the dev subset can reach at all.
+
+Caveat on the simulation: it treats the two arms as independent Bernoulli
+draws per goal. Real paired arms share trajectory structure, concordant pairs
+drop out of a sign test, and that raises power above these figures. Treat the
+table as the right order of magnitude rather than an exact operating
+characteristic — the conclusion survives either way, because the gap between
+2.4% and 51.5% is not a modelling detail.
+
+The practical consequences:
+
+- **Stop using the dev subset to decide SR questions.** It is adequate for
+  perception metrics with high base rates and large effects, and nothing else.
+  Iterate on `ever_matched`, `detector_in_view` and `node_error_m`.
+- **Expanding the dev subset would help less than it looks.** Power scales
+  with distinct goals, not subtasks, and GOAT-Bench gives 0.38 goals per
+  subtask on the full set against 0.28 here. Doubling the episodes buys
+  roughly sqrt(2) in resolution at 4x the wall clock.
+- **The one reserved `val_unseen` run is the only instrument in this project
+  that can resolve a success-rate claim**, at >99% power for 5 points. That is
+  an argument for spending it on the best configuration available rather than
+  the earliest one that looks finished.

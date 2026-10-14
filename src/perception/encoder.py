@@ -61,3 +61,37 @@ class ClipEncoder:
         embeds = embeds.float()
         embeds = embeds / embeds.norm(dim=-1, keepdim=True)
         return embeds.cpu().numpy()
+
+
+def validate_encoder(model_name: str, pretrained: str) -> None:
+    """Check an (architecture, weights) pairing before anything expensive runs.
+
+    PLAN.md Section 7.10 names MobileCLIP-S0 for the encoder ablation. This
+    stack's open_clip (3.3.0) does not carry it -- it has MobileCLIP-S1, -S2,
+    -B and MobileCLIP2-S0 -- so that arm would have failed after loading a
+    scene and a detector, once per arm, with open_clip's own error. Raise here
+    instead, naming what does exist.
+
+    Raises:
+        ValueError: if open_clip has no such (model, pretrained) pairing.
+    """
+    import open_clip
+
+    available = open_clip.list_pretrained()
+    if (model_name, pretrained) in available:
+        return
+
+    models = {m for m, _ in available}
+    if model_name not in models:
+        stem = model_name.split("-")[0].lower()
+        near = sorted(m for m in models if m.lower().startswith(stem[:6]))
+        raise ValueError(
+            f"open_clip {open_clip.__version__} has no model {model_name!r}. "
+            f"Closest available: {near or sorted(models)[:8]}"
+        )
+
+    tags = sorted(p for m, p in available if m == model_name)
+    raise ValueError(
+        f"open_clip {open_clip.__version__} has model {model_name!r} but not "
+        f"with pretrained weights {pretrained!r}. Available tags: {tags}"
+    )

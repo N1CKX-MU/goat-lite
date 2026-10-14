@@ -72,6 +72,27 @@ GRIDS: dict[str, list[tuple[str, str]]] = {
         ("lang024", "--language-threshold 0.24"),
         ("lang028", "--language-threshold 0.28"),
     ],
+    # Section 7.10's planner axis. A* against Fast Marching, same map, same
+    # goals. resolve_planner() refuses 'fmm' outright if skfmm is missing.
+    "planner": [
+        ("astar", "--planner astar"),
+        ("fmm", "--planner fmm"),
+    ],
+    # Section 7.10's exploration axis. 'random' is the control: if it ties the
+    # scored rules, frontier choice is not what limits the agent.
+    "frontier": [
+        ("nearlarge", "--frontier-strategy nearest-largest"),
+        ("largest", "--frontier-strategy largest"),
+        ("random", "--frontier-strategy random"),
+    ],
+    # Section 7.10's encoder axis. It names MobileCLIP-S0, which open_clip
+    # 3.3.0 does not have; MobileCLIP2-S0 is the nearest equivalent and
+    # validate_encoder() will reject a name that cannot load.
+    "encoder": [
+        ("vitb32", ""),
+        ("mobileclip2s0",
+         "--encoder-model MobileCLIP2-S0 --encoder-pretrained dfndr2b"),
+    ],
     "merge": [
         ("merge050", "--merge-dist 0.50"),
         ("merge075", "--merge-dist 0.75"),

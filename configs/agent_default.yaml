@@ -23,6 +23,21 @@ agent:
   verify_giveup_steps: 12        # 360 deg at 30 deg/turn; 5 could not frame a goal behind (6.37)
   verify_facing_tol_deg: 30.0    # camera hfov is 90, so 45 either side; one turn is 30
   commit_distance_frac: 0.8      # stopping at the boundary failed by 2 cm (6.37, 6.42)
+  planner: "astar"               # Section 7.10 axis; 'fmm' needs skfmm and is checked at build
+  frontier_strategy: "nearest-largest"   # size/(dist+1); 'largest' and 'random' are the other arms
+  frontier_seed: 42              # the random arm must be reproducible to be an experiment
+
+sim:
+  # The RGB/depth sensor size. Not cosmetic: the detector is trained at 512 and
+  # loses 34% of its mAP50 at 256 (6.60) -- more than the entire v2 retraining
+  # gained, to the point that v1 at 512 outscores v2 at 256. Every intrinsic
+  # derives from this via make_intrinsics(hfov, w, h), so it is safe to raise;
+  # it costs 4x the pixels per step. run_dev_eval.py --resolution overrides it.
+  # hfov is deliberately absent: it comes from habitat's own sensor spec, not
+  # from a constructor default, so tests/test_config.py cannot check it without
+  # loading a scene. An unchecked value in this file is what the file exists to
+  # prevent.
+  resolution: 256
 
 perception:
   detector:
@@ -32,6 +47,9 @@ perception:
     imgsz: 512                   # must equal the finetune resolution (6.11)
     fp16: true
   encoder:
+    # Section 7.10 names MobileCLIP-S0 for the ablation; open_clip 3.3.0 has
+    # no such model (it has MobileCLIP-S1/S2/B and MobileCLIP2-S0), so
+    # validate_encoder() rejects it with the alternatives.
     model_name: "ViT-B-32"
     pretrained: "laion2b_s34b_b79k"
     fp16: true
