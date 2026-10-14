@@ -3389,3 +3389,62 @@ the 56 bytes would have made habitat's own tooling able to read the archive;
 not repairing it meant finding out that habitat's tooling tries to. The scenes
 are extracted either way, so the tar is now only a backup, and the skip is the
 fix that generalises.
+
+#### 6.57 A scene-level split stranded a goal category the detector is scored on
+
+*2026-10-14.* The 150-frame rebuild rendered 14862 images and 57634 boxes, 2.49x
+the previous build's 5971 / 23177 — exactly the ratio the frame raise predicts.
+Per-class counts then showed something the totals hide:
+
+| class | train boxes | val boxes |
+|---|---|---|
+| christmas tree | **0** | 8 |
+| shower glass | 7 | 0 |
+| exercise bike | 44 | 0 |
+| freezer | 20 | 1 |
+
+`christmas tree` is annotated in **exactly one** of the 145 annotated train
+scenes. The split is by scene at `--val-frac 0.1`, and seed 42 put that scene
+in val. So the class had no training data at all, **and was still scored**: mAP50
+averages over classes, so a class the split had made unlearnable contributed
+recall 0.00 to the headline number. Some part of the 0.149 that this whole
+rebuild is meant to improve was an artifact of the split, not of the detector.
+
+It matters beyond the metric. `christmas tree` is **7 of the 218 dev subtasks**
+(3.2%) and 18 of the 2669 in full `val_unseen`.
+
+`stratified_scene_split()` now decides the split: a scene may move to val only
+while every class it carries still has a scene left in train. Train wins ties,
+because a class present in one scene cannot be in both and having it in train
+is strictly better than having it only in val; if the requested fraction cannot
+be reached without stranding something, it returns fewer val scenes. Scene
+contents come from each scene's `semantic.txt` rather than from habitat, since
+the split has to be decided before any rendering starts. On the real corpus,
+at the same seed and the same 14 val scenes, this takes classes with a train
+scene from **35/36 to 36/36**.
+
+Two things this does not fix, and they are the real ceiling. `christmas tree`
+still has one instance, so it is unlearnable from HM3D-Semantics whichever
+split it lands in — the fix stops it corrupting the metric, not the data.
+And the goal distribution is badly matched to the annotation supply:
+
+| goal category | subtasks in full val_unseen | train instances |
+|---|---|---|
+| mirror | 483 | 841 |
+| refrigerator | 464 | 124 |
+| picture | 325 | 3081 |
+| microwave | 132 | 105 |
+| piano | 43 | 17 |
+| christmas tree | 18 | 1 |
+
+`refrigerator` is 17.4% of all `val_unseen` goals against 124 instances in 91
+scenes. Across the categories under 20 instances, about **4% of subtasks cannot
+be won by any detector trained on this data**, which belongs with 6.32 and 6.35
+as a data-availability ceiling rather than a policy failure.
+
+Separately, writing into a populated output directory was silent train/val
+contamination: frames are named `<scene_index>_<frame>.jpg`, so when the split
+changes the previous run's copy of a scene stays behind on the other side and
+the same image appears in both halves. `--out` now refuses a non-empty
+directory unless `--force` is given. Caught before it happened, while preparing
+to re-render over the first build.

@@ -21,6 +21,9 @@ Send only the trained weights back; the dataset itself can stay on this machine.
 from __future__ import annotations
 
 import argparse
+import collections
+import csv
+import glob
 import os
 import random
 import sys
@@ -48,6 +51,66 @@ def find_scenes(hm3d_root: str) -> list[tuple[str, str]]:
         if glb and sem:
             scenes.append((glb, sem))
     return scenes
+
+
+def goat_classes_in_scene(semantic_txt: str) -> set[str]:
+    """GOAT categories annotated in one scene, read from its semantic.txt.
+
+    Cheap on purpose: the alternative is loading the scene in habitat, and the
+    split has to be decided before any rendering starts. Format is a one-line
+    header then ``id,hex,"category",region`` per instance.
+    """
+    out: set[str] = set()
+    try:
+        with open(semantic_txt, encoding="utf-8", errors="replace") as f:
+            for line in f.read().splitlines()[1:]:
+                parts = next(csv.reader([line]), [])
+                if len(parts) >= 3 and hm3d_name_to_id(parts[2]) is not None:
+                    out.add(GOAT_CATEGORIES[hm3d_name_to_id(parts[2])])
+    except OSError:
+        pass
+    return out
+
+
+def stratified_scene_split(classes_by_scene, val_frac, rng) -> list[int]:
+    """Pick val scene indices without leaving a class absent from train.
+
+    The split is by scene, so a class annotated in only one scene goes wholly
+    to whichever side that scene lands on. Measured 2026-10-14: at val_frac
+    0.1 and seed 42, `christmas tree` -- one scene out of 145 -- landed in val,
+    giving 0 train boxes and 8 val boxes. The detector could not learn it, and
+    because mAP50 averages over classes it was then scored on a class it had
+    never seen, dragging the headline metric down for a reason that is a
+    property of the split rather than of the model.
+
+    A scene may move to val only while every class it carries still has a
+    scene left in train. Train wins ties: a class in one scene cannot be in
+    both, and being in train is strictly better than being only in val. If the
+    requested fraction cannot be reached without stranding something, this
+    returns fewer val scenes rather than stranding it.
+    """
+    n = len(classes_by_scene)
+    if n <= 1:
+        return []
+    target = max(1, int(n * val_frac))
+
+    remaining: collections.Counter = collections.Counter()
+    for cs in classes_by_scene:
+        remaining.update(cs)
+
+    order = list(range(n))
+    rng.shuffle(order)
+
+    val: list[int] = []
+    for si in order:
+        if len(val) >= target:
+            break
+        cs = classes_by_scene[si]
+        if all(remaining[c] > 1 for c in cs):
+            val.append(si)
+            for c in cs:
+                remaining[c] -= 1
+    return sorted(val)
 
 
 def find_scene_dataset_config(hm3d_root: str) -> str | None:
@@ -197,6 +260,8 @@ def main() -> None:
     ap.add_argument("--max-area-frac", type=float, default=0.6)
     ap.add_argument("--val-frac", type=float, default=0.1, help="fraction of scenes held out for val")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite a populated --out instead of refusing")
     ap.add_argument(
         "--gpu-device-id",
         type=int,
@@ -233,10 +298,48 @@ def main() -> None:
         )
     print(f"Scene dataset config: {scene_dataset_config}")
 
-    random.shuffle(scenes)
-    n_val = max(1, int(len(scenes) * args.val_frac))
-    val_scenes = set(range(n_val))
+    # Class-aware split: see stratified_scene_split. The scene order is still
+    # shuffled, but a scene carrying the last train copy of a class stays put.
+    classes_by_scene = [
+        goat_classes_in_scene(sem.replace(".semantic.glb", ".semantic.txt"))
+        for _, sem in scenes
+    ]
+    val_scenes = set(stratified_scene_split(
+        classes_by_scene, args.val_frac, random.Random(args.seed)))
+    n_val = len(val_scenes)
+    held = sorted(set().union(*classes_by_scene) if classes_by_scene else set())
+    train_classes = set().union(
+        *[c for i, c in enumerate(classes_by_scene) if i not in val_scenes]
+    ) if classes_by_scene else set()
+    stranded = [c for c in held if c not in train_classes]
     print(f"Found {len(scenes)} scenes with semantics ({n_val} -> val).")
+    print(f"  {len(held)} GOAT classes present; "
+          f"{len(train_classes)} have a train scene.")
+    if stranded:
+        print(f"  WARNING stranded in val, will train at zero: {stranded}")
+    if n_val < max(1, int(len(scenes) * args.val_frac)):
+        print(f"  val is smaller than --val-frac asked for: holding scenes "
+              f"back was the only way to keep every class in train.")
+
+    # Writing into a populated output directory is train/val contamination
+    # waiting to happen: frames are named <scene_index>_<frame>.jpg, so if the
+    # split changes, the previous run's copy of a scene stays behind in the
+    # other split and the same image ends up on both sides. Refuse instead.
+    existing = [
+        f for split in ("train", "val") for sub in ("images", "labels")
+        for f in glob.glob(os.path.join(args.out, sub, split, "*"))
+    ]
+    if existing and not args.force:
+        raise SystemExit(
+            f"{args.out} already holds {len(existing)} files. A different "
+            "split would leave the old ones behind in the wrong half, so the "
+            "same frame would appear in train AND val. Render to a new --out, "
+            "or pass --force to overwrite this one."
+        )
+    if existing and args.force:
+        for f in existing:
+            os.remove(f)
+        print(f"--force: removed {len(existing)} files from {args.out}")
 
     for split in ("train", "val"):
         os.makedirs(os.path.join(args.out, "images", split), exist_ok=True)
