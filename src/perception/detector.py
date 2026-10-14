@@ -33,7 +33,8 @@ class YOLODetector:
         weights: str | None = None,
         device: str = "cuda",
         fp16: bool = True,
-        # The finetuned GOAT detector is recall-limited (mAP50 0.149), so a high
+        # The finetuned GOAT detector is recall-limited (mAP50 0.170, recall
+        # 0.22 on held-out scenes after the 6.59 rebuild), so a high
         # confidence gate blinds the agent: measured over 40 val frames, conf
         # 0.35 produced detections in only 20% of them, leaving instance memory
         # empty and the matcher with nothing to match. 0.15 raises that to 50%.
