@@ -88,7 +88,7 @@ achievable with a heavyweight modular stack. It does not establish:
 | # | Objective | Status (2026-09-16) |
 |---|---|---|
 | 1 | Design and implement a complete modular navigation stack — detection, vision-language embedding, occupancy mapping, instance memory, multi-modal goal matching, planning and control — within a 4 GB VRAM budget | **Complete** |
-| 2 | Evaluate on GOAT-Bench `val_unseen` (36 scenes, 360 episodes, 2,669 subtasks); report SR and SPL per modality | In progress — harness built, dev-subset results pending |
+| 2 | Evaluate on GOAT-Bench `val_unseen` (36 scenes, 360 episodes, 2,669 subtasks); report SR and SPL per modality | **Complete** — SR 9.44%, SPL 0.0830 over all 2,669 subtasks; category 13.82%, image 8.27%, language 5.49% |
 | 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | **Complete** — attenuation chain measured: matching 43.6% vs 27.1% (p = 0.016 clustered by goal), usable matches 12.8% vs 7.8% (p = 0.08), SR 3.2% vs 3.2% (p = 1.000), with subtask 0 as a negative control |
 | 4 | Attribute end-to-end failure to individual components, producing a per-module failure taxonomy backed by measurements | In progress — 32 findings logged |
 | 5 | Quantify the data-availability ceiling that HM3D-Semantics imposes on the benchmark vocabulary | **Complete** — 59.2% |
@@ -802,7 +802,80 @@ image SR near 25% before any other limit applies. Implementing true image-goal
 matching is therefore reclassified from an optional extension to required work
 (§4.9).
 
-### 4.6 Results IV — End-to-End Status
+### 4.6 Results IV — The full `val_unseen` evaluation
+
+The one reserved run (Section 8 protocol), 2026-10-14/15, on the configuration
+locked by the Week 10 ablations: 512 px sensors, memory on,
+`language_threshold` 0.24, `merge_dist` 0.75, A*, nearest-largest frontier,
+seed 42. **All 360 episodes, 2,669 subtasks, 36 unseen HM3D scenes.** 14.9 h
+locally at 20.5 s/subtask.
+
+| | n | SR | SPL | `ever_matched` |
+|---|---|---|---|---|
+| **overall** | **2,669** | **9.44%** | **0.0830** | 65.2% |
+| category | 991 | 13.82% | 0.1238 | 73.3% |
+| image | 822 | 8.27% | 0.0737 | 72.0% |
+| language | 856 | 5.49% | 0.0446 | 49.4% |
+
+**The development subset misreported nearly all of this.** It gave 3.2% SR at
+256 px and 7.8% at 512, against 9.44% here, and it put image goals at exactly
+**0.0%** — described in an earlier draft of this report as "a measurable zero
+rather than an inactive code path". The true figure is 8.27%, 68 successes.
+Section 4.6.2 and §6.64 give the reason: 30 episodes carry only 61 distinct
+goals, which cannot resolve a success rate near 5%. The development subset is
+adequate for perception metrics and was never capable of answering the
+question it was being asked.
+
+**Language is the weakest modality, and the cause is one stage upstream.** Its
+`ever_matched` is 49.4% against roughly 73% for category and image. The agent
+is not failing to navigate to described objects; it is failing to work out
+which instance a description denotes. That is CLIP text-instance matching, and
+it is the single clearest lever this evaluation exposes.
+
+#### The lifelong curve, and why its obvious reading is wrong
+
+Pooled across all episodes, success rate by position looks like the result the
+project set out to find:
+
+| subtask index | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| n | 360 | 360 | 360 | 360 | 360 | 284 | 232 | 168 | 121 | 64 |
+| SR | 8.1% | 8.3% | 10.3% | 11.7% | 11.1% | 10.6% | 7.3% | 4.8% | 9.1% | 12.5% |
+
+Grouped, subtasks 0–1 score 8.19%, subtasks 2–5 score 10.92% and subtasks 6–9
+score 7.52%; Fisher gives p = 0.055 early-vs-mid and p = 0.021 mid-vs-late.
+Performance appears to rise as memory accumulates and fall as it fills.
+
+**It is an artifact of mixing episode lengths.** Only long episodes have a
+subtask 9, and length tracks difficulty hard:
+
+| episode length | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|
+| n | 380 | 312 | 448 | 376 | 513 | 640 |
+| SR | 9.47% | **14.74%** | 12.95% | 8.51% | **5.85%** | 7.81% |
+
+A 6-subtask episode scores two and a half times a 9-subtask one. The early
+bins are dominated by short easy episodes, the late bins contain only long
+hard ones. Two controls remove the effect completely:
+
+- **Within the 64 episodes of exactly 10 subtasks**, where composition cannot
+  change: 0–1 7.03%, 2–5 8.20%, 6–9 7.81%. p = 0.84 and p = 1.00.
+- **Paired within every episode**, first half against second half, controlling
+  for scene, length and difficulty at once: the second half is better in 64
+  episodes, worse in 49, tied in 247. Sign test **p = 0.188**.
+
+**Success rate does not measurably improve within an episode.** The direction
+is positive and the instrument cannot resolve it, which is not the same as
+memory doing nothing: Section 4.6.1 shows memory significantly improves whether a
+candidate is matched at all, and the attenuation chain shows why that does not
+reach the score.
+
+So the result of this project is not the lifelong curve. It is the chain —
+memory measurably improves candidate recall; the improvement does not survive
+the stages between a match and a scored stop; and the pooled curve that
+appears to show otherwise is an artifact of episode-length composition.
+
+#### 4.6.1 What the development subset said, and why it was wrong
 
 **Success Rate on the development subset: 3.2%** (7 of 218 subtasks, 30
 episodes of `val_unseen`, seed 42), SPL 0.028. Two full evaluations were run,
@@ -854,7 +927,7 @@ no new runs:
 | SR | 3.2% | 3.2% | 5 / 5 | 1.000 | 3 / 4, p = 1.000 |
 | `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | < 0.0001 | **22 / 8, p = 0.016** |
 
-The final column matters and is explained in §4.6.1: the 218 subtasks carry
+The final column matters and is explained in §4.6.2: the 218 subtasks carry
 only 61 distinct `(episode_id, category)` goals, so the subtask-level test
 overstates its evidence. The effect survives the conservative reading.
 
@@ -907,7 +980,7 @@ usable-match stage and entirely gone by the time it reaches a score. Both
 numbers are true of the same two runs, and quoting either alone misrepresents
 the system.
 
-#### 4.6.1 Why these tests are clustered by goal
+#### 4.6.2 Why these tests are clustered by goal
 
 The 218 dev subtasks carry only **61 distinct `(episode_id, category)`
 goals**. Episode 3 asks for the same mirror thirteen times, episode 6 the same
@@ -1175,7 +1248,7 @@ matching, and deployment on physical hardware.
 
 ## Appendices *(to be assembled)*
 
-- **A — Engineering log.** 64 dated findings with the measurement that produced
+- **A — Engineering log.** 67 dated findings with the measurement that produced
   each, in `TECHNICAL_GUIDE.md` §6, including negative results and failed fixes.
 - **B — Reproduction.** Environment, commands and locally runnable episodes, in
   `docs/DEMO.md`.

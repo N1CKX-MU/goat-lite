@@ -3911,3 +3911,81 @@ The same hazard applies to `node_error_m` and `distance_to_goal`, both of
 which can be `inf` for a subtask with no reachable goal. Neither is currently
 averaged into a headline, but any future aggregate over them needs the same
 guard.
+
+#### 6.67 The full val_unseen run: 9.44% SR, and the lifelong curve is an artifact
+
+The one reserved run (PLAN.md Section 8), 2026-10-14/15, locked config: 512 px,
+memory on, `language_threshold` 0.24, `merge_dist` 0.75, A*, nearest-largest
+frontier, seed 42. All 360 episodes, 2669 subtasks, 36 scenes, 14.9 h on the
+local RTX 3050 at 20.5 s/subtask.
+
+| | SR | SPL | `ever_matched` |
+|---|---|---|---|
+| **overall** | **9.44%** (252/2669) | **0.0830** | 65.2% |
+| category | 13.82% (991) | 0.1238 | 73.3% |
+| image | 8.27% (822) | 0.0737 | 72.0% |
+| language | 5.49% (856) | 0.0446 | 49.4% |
+
+**The development subset was wrong about almost everything.** It reported
+3.2% SR at 256 px and 7.8% at 512; the full split gives 9.44%. It reported
+image goals at **0.0%** — recorded in the report as "a measurable zero rather
+than an inactive code path" — and the true figure is 8.27%, 68 successes.
+6.64 predicted exactly this: 61 distinct goals cannot resolve a success rate,
+and the conclusions drawn from them were noise. Every null result this term
+should be re-read in that light.
+
+Language is the weakest modality by a wide margin, and the reason is visible
+one stage up: its `ever_matched` is 49.4% against 73.3% and 72.0% for the
+other two. The agent is not failing to navigate to described objects; it is
+failing to identify which instance the description refers to. That is a CLIP
+text-instance matching problem, not a policy one, and it is the clearest
+single lever this evaluation exposes.
+
+**The lifelong curve, and why the obvious reading of it is wrong.** Pooled
+over all episodes, SR by subtask index looks like an inverted U — 8.1% at
+index 0, rising to 11.7% at index 3, falling to 4.8% at index 7. Taking the
+bins as blocks, subtasks 0-1 score 8.19%, subtasks 2-5 score 10.92%, subtasks
+6-9 score 7.52%; early-vs-mid is Fisher p = 0.055 and mid-vs-late p = 0.021.
+Read naively that is the headline claim of the project: performance improves
+as memory accumulates, then degrades as the memory fills with clutter.
+
+It is a composition artifact. **Only long episodes have a subtask 9**, and
+episode length is strongly confounded with difficulty:
+
+| episode length | n | SR |
+|---|---|---|
+| 5 | 380 | 9.47% |
+| 6 | 312 | **14.74%** |
+| 7 | 448 | 12.95% |
+| 8 | 376 | 8.51% |
+| 9 | 513 | **5.85%** |
+| 10 | 640 | 7.81% |
+
+A 6-subtask episode scores two and a half times a 9-subtask one. The early
+bins are a mixture dominated by short, easy episodes; the late bins contain
+only long, hard ones. Controlling for it removes the effect entirely:
+
+- **Within the 64 episodes of exactly 10 subtasks** (n = 64 per index, no
+  composition change at all): 0-1 7.03%, 2-5 8.20%, 6-9 7.81%.
+  Early-vs-mid p = 0.84, mid-vs-late p = 1.00. Flat.
+- **Paired within every episode**, first half against second half, which
+  controls for scene, length and difficulty together: the second half is
+  better in 64 episodes, worse in 49, tied in 247. Sign test **p = 0.188**.
+
+So the honest statement is: **the success rate does not measurably improve
+within an episode.** The direction is positive (64 against 49) and the
+instrument cannot resolve it, which is a different claim from "memory does
+nothing" — 6.62 shows memory significantly improves whether the agent matches
+a candidate at all (p = 0.016 clustered), and 6.62's attenuation chain shows
+why that does not arrive at the score: the matches memory adds are a median
+3.43 m from the goal.
+
+The project's headline result is therefore not the lifelong curve. It is the
+chain: memory measurably improves recall of candidates, the improvement does
+not survive the stages between a match and a scored stop, and the pooled
+curve that appears to show otherwise is an artifact of mixing episode lengths.
+
+Operational note: the run wrote `"overall_spl": NaN` because it loaded
+`metrics.py` before 6.66 was fixed. `summary.json` has been regenerated from
+`results.csv` with the corrected rule; what the run actually emitted is kept
+beside it as `summary.json.asrun`.

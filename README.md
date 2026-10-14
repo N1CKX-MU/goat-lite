@@ -17,8 +17,22 @@ throughout, 256×256 sensors, and every model choice. Peak usage stays under 3 G
 ## What this repository is for
 
 The interesting output is not a leaderboard number but an **attributed account
-of what fails** at a reduced operating point. Five results so far:
+of what fails** at a reduced operating point. Six results so far:
 
+- **The headline evaluation.** On the full GOAT-Bench `val_unseen` split — 360
+  episodes, 2,669 subtasks, 36 unseen HM3D scenes, one reserved run —
+  **SR 9.44%, SPL 0.0830**: category 13.82%, image 8.27%, language 5.49%.
+  Language trails because its matcher does, not its navigator: `ever_matched`
+  is 49.4% against ~73% for the other two modalities. The 30-episode
+  development subset had reported 3.2% and had put image goals at exactly
+  0.0%; both were artifacts of its 61 distinct goals (§6.64, §6.67).
+- **The lifelong curve is a composition artifact.** Pooled over episodes, SR
+  rises from 8.1% at the first subtask to 11.7% by the fourth and falls after
+   — the shape the project set out to find. It does not survive the control:
+  only long episodes have late subtasks, and episode length tracks difficulty
+  (6-subtask episodes score 14.74%, 9-subtask ones 5.85%). Within episodes of
+  a fixed length the curve is flat, and paired within every episode the second
+  half beats the first 64 times against 49, **p = 0.188**. §6.67.
 - **The lifelong memory works, and does not reach the score.** Measured over
   218 subtasks paired position-by-position, memory on against memory off, the
   effect attenuates at every stage: the agent matches a candidate for its goal
@@ -50,7 +64,7 @@ of what fails** at a reduced operating point. Five results so far:
   no pitch action, 14.2% of subtasks have a goal that cannot be framed from
   anywhere a scoring stop could happen — every `rug` subtask among them. §6.35,
   §6.42.
-- **A per-component failure taxonomy**, with 64 dated findings in
+- **A per-component failure taxonomy**, with 67 dated findings in
   `TECHNICAL_GUIDE.md` §6, each paired with the measurement that produced it,
   **including the hypotheses that turned out to be wrong**.
 

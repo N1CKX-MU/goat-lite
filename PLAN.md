@@ -1056,10 +1056,38 @@ Save all outputs to a Kaggle dataset, then download for local analysis.
 
 **Have a backup plan.** If Kaggle GPU is unavailable or the run fails midway, fall back to the 100-episode mid-scale eval on local 3050 (~20 hours). This is what you cite in the report if the full run doesn't happen. Not a failure — a documented compute constraint.
 
+> **STATUS (2026-10-15).** Done, and **not on Kaggle**. The run is CPU-bound,
+> not GPU-bound — the card sat at 6-21% throughout — and Kaggle allots ~4 CPU
+> cores against this machine's 12, so the P100 would have been slower than the
+> 3050 laptop for this workload while also requiring a 3.4 GB upload and a
+> 30 h/week quota. Run locally instead: **14.9 h, 20.5 s/subtask, all 360
+> episodes / 2669 subtasks / 36 scenes**, finishing 03:21. Steps 1-4 of the
+> Kaggle recipe below were therefore not needed; `scripts/setup_kaggle.sh`
+> remains correct and its layout verifier passes, for anyone repeating this on
+> a machine with fewer cores to spare.
+>
+> Results, full detail in 6.67: **SR 9.44%, SPL 0.0830**; category 13.82%,
+> image 8.27%, language 5.49%. The development subset had said 3.2% and had
+> recorded image goals at exactly 0.0% — both were sample-size artifacts of
+> its 61 distinct goals (6.64).
+>
+> The lifelong curve is plotted and is **flat once the confound is removed**.
+> Pooled, it looks like an inverted U with mid-episode subtasks ahead of early
+> ones (p = 0.055) and late ones behind (p = 0.021). But only long episodes
+> have late subtasks, and episode length tracks difficulty hard — 6-subtask
+> episodes score 14.74%, 9-subtask episodes 5.85%. Within the 64 episodes of
+> exactly 10 subtasks the curve is flat (p = 0.84, p = 1.00), and paired
+> within every episode the second half beats the first in 64 episodes against
+> 49, **p = 0.188**. No measurable within-episode improvement in success rate.
+
 **Week 11 Done Criteria:**
-- [ ] Final `val_unseen` (or mid-scale fallback) results saved and analyzed.
-- [ ] Per-modality SR/SPL numbers.
-- [ ] Lifelong curve (SR by subtask index within episode) plotted.
+- [x] Final `val_unseen` results saved and analyzed. — `outputs/full_eval/`,
+      all 360 episodes, no fallback needed.
+- [x] Per-modality SR/SPL numbers. — category 13.82% / 0.1238, image
+      8.27% / 0.0737, language 5.49% / 0.0446.
+- [x] Lifelong curve (SR by subtask index within episode) plotted. — plotted,
+      and shown to be a composition artifact; the controlled versions are
+      flat (6.67).
 
 ---
 
