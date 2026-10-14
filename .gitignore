@@ -38,3 +38,6 @@ Thumbs.db
 # Conda/venv
 .conda/
 .venv/
+
+# ultralytics training output (weights are promoted to checkpoints/ by hand)
+runs/
