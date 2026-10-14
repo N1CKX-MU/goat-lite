@@ -61,6 +61,30 @@ def sign_test(a_only: int, b_only: int) -> float:
     return min(p, 1.0)
 
 
+def discordant_clusters(a: list[dict], b: list[dict], metric: str) -> tuple[int, int]:
+    """Discordant pairs, counted once per distinct goal rather than per subtask.
+
+    GOAT-Bench episodes revisit the same object: the 218-subtask dev subset
+    carries only 61 distinct ``(episode_id, category)`` goals, and episode 3
+    asks for the same mirror thirteen times, each arrival ending at the same
+    distance. Those are not independent observations, so a sign test over
+    subtasks overstates its evidence -- 13 flips against 4 (p = 0.049) is 8
+    distinct goals against 4 (p = 0.388). See 6.63.
+
+    A cluster that flips both ways counts on both sides: it is evidence for
+    neither arm, and assigning it to one would be the convenient choice rather
+    than the honest one.
+    """
+    a_flip, b_flip = set(), set()
+    for x, y in zip(a, b):
+        key = (x.get("episode_id"), x.get("category"))
+        if x.get(metric) in TRUE and y.get(metric) not in TRUE:
+            a_flip.add(key)
+        elif y.get(metric) in TRUE and x.get(metric) not in TRUE:
+            b_flip.add(key)
+    return len(a_flip), len(b_flip)
+
+
 def pair_rows(a: list[dict], b: list[dict]) -> tuple[list[dict], list[dict]]:
     """Truncate both arms to their common prefix, verifying row identity."""
     n = min(len(a), len(b))
@@ -104,7 +128,8 @@ def compare(a: list[dict], b: list[dict], label_a: str, label_b: str) -> None:
     # the counts get interesting.
     w = max(len(label_a), len(label_b), len(f"{n}/{n} (100.0%)"))
     print(f"{'metric':18s} {label_a:>{w}s} {label_b:>{w}s} "
-          f"{'only A':>7s} {'only B':>7s} {'p':>8s}")
+          f"{'only A':>7s} {'only B':>7s} {'p':>8s}   "
+          f"{'clA':>5s} {'clB':>5s} {'p(clust)':>8s}")
     for metric in BOOL_METRICS:
         if metric not in a[0]:
             continue
@@ -115,14 +140,20 @@ def compare(a: list[dict], b: list[dict], label_a: str, label_b: str) -> None:
         ob = sum(1 for x, y in zip(a, b)
                  if y[metric] in TRUE and x[metric] not in TRUE)
         p = sign_test(oa, ob)
+        ka, kb = discordant_clusters(a, b, metric)
+        pc = sign_test(ka, kb)
         star = " *" if p < 0.05 else ""
+        starc = " *" if pc < 0.05 else ""
         print(f"{metric:18s} {f'{ca}/{n} ({ca/n*100:.1f}%)':>{w}s} "
               f"{f'{cb}/{n} ({cb/n*100:.1f}%)':>{w}s} "
-              f"{oa:7d} {ob:7d} {p:8.4f}{star}")
+              f"{oa:7d} {ob:7d} {p:8.4f}{star:2s} "
+              f"{ka:5d} {kb:5d} {pc:8.4f}{starc}")
 
-    needed = 6
-    print(f"\n* p < 0.05. With no flips the other way, {needed} one-way flips "
-          f"are needed to reach it.")
+    goals = len({(r.get("episode_id"), r.get("category")) for r in a})
+    print(f"\n* p < 0.05. Left p is over subtasks, right over the {goals} "
+          f"distinct (episode, category) goals these {n} subtasks carry.")
+    print("GOAT-Bench episodes revisit the same object, so subtasks are not "
+          "independent; the clustered column is the conservative read (6.63).")
 
 
 def main() -> None:

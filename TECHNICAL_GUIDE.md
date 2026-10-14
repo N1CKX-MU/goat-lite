@@ -3642,10 +3642,10 @@ of anything memory touches, and at 3.2% one subtask is 1.4 pp. `ever_matched`
 actually acts on, and every subtask contributes to it. On the same paired
 218 subtasks, no new runs:
 
-| metric | memory on | memory off | discordant | p |
-|---|---|---|---|---|
-| SR | 3.2% | 3.2% | 5 / 5 | 1.000 |
-| `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | **p < 0.0001** |
+| metric | memory on | memory off | discordant | p | clustered (6.63) |
+|---|---|---|---|---|---|
+| SR | 3.2% | 3.2% | 5 / 5 | 1.000 | 3 / 4, p = 1.000 |
+| `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | p < 0.0001 | **22 / 8, p = 0.016** |
 
 And the effect has the right *shape*, which is what makes it the lifelong
 property rather than a nuisance difference. Split by subtask index:
@@ -3678,11 +3678,11 @@ off, 16 closer against 18, p = 0.864. Memory adds recall, not precision.
 
 Carrying that through gives the full attenuation chain on one pair of runs:
 
-| stage | memory on | memory off | discordant | p |
-|---|---|---|---|---|
-| matched anything | 43.6% | 27.1% | 48 / 12 | **< 0.0001** |
-| matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 |
-| scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 |
+| stage | memory on | memory off | discordant | p | clustered |
+|---|---|---|---|---|---|
+| matched anything | 43.6% | 27.1% | 48 / 12 | < 0.0001 | **0.016** |
+| matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 | — |
+| scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 | 1.000 |
 
 Each stage loses the signal the one before it carried. That is the precise
 statement of this project's central difficulty and it is now measured rather
@@ -3691,18 +3691,13 @@ at which the agent recalls a candidate for the goal — but two thirds of the
 candidates it adds are more than a metre from the object, so the advantage is
 already half gone by the usable-match stage and entirely gone by SR.**
 
-**Memory also makes the agent faster, and the control holds there too.**
-`steps_taken` over the same paired runs: mean 380 with memory against 422
-without, 45 subtasks finishing in fewer steps against 22 in more,
-**p = 0.0067**. Split the same way as before, subtask 0 is 1 against 0
-(p = 1.000) and subtasks 1+ are 44 against 22 (**p = 0.0092**). The share of
-subtasks that burn the whole 500-step budget falls from 78.4% to 73.4%.
-
-This matters because it is a second, independent metric with the same negative
-control passing. Recall of candidates and step economy are different
-consequences of the same inherited map and instance database, and both appear
-only where there is something to inherit. A single significant metric could be
-a lucky aggregation; two, each with a clean control, is the mechanism.
+**Memory also appears to make the agent faster, but that one does not
+survive scrutiny.** `steps_taken` over the same paired runs: mean 380 with
+memory against 422 without, 45 subtasks finishing in fewer steps against 22 in
+more, p = 0.0067, and the share burning the whole 500-step budget falls from
+78.4% to 73.4%. Clustered to distinct goals as 6.63 requires, it is 19 against
+11 and **p = 0.20**. The direction is right and the evidence is not there.
+Recorded as suggestive, not as a result.
 
 So the criterion is met: the delta is computed and is greater than zero, with
 p < 0.0001 on the metric memory acts on. It should be reported with the chain
@@ -3719,3 +3714,55 @@ expected to move. The Week 10 section had itself suggested it — "if a sweep is
 wanted before then, run it on `ever_matched` and `node_error_m`, which every
 subtask contributes to, rather than on success" — and the suggestion was not
 applied to the memory ablation it was written next to.
+
+#### 6.63 GOAT-Bench repeats its goals, so every sign test this term overstated itself
+
+The 30-episode dev subset has 218 subtasks. It has **61 distinct
+`(episode_id, category)` goals.** Episode 3 asks for the same mirror
+**thirteen times**; episode 6 asks for the same mirror ten times; episode 9
+asks for the same refrigerator nine times. 157 of the 218 subtasks are a
+repeat of a goal already seen in their own episode.
+
+That is the benchmark working as designed — asking for the same object through
+a category, then a description, then a photo is the whole point of a
+multi-modal benchmark — but it means **subtasks are not independent
+observations**, and every paired sign test run this term has treated them as
+if they were.
+
+It was found by auditing a result that looked too good. The 512 px arm beat
+256 px on success 13 flips to 4, p = 0.049. Six of those thirteen came from
+episode 3, all of them the same mirror, all ending at 0.86 m or 0.93 m, and
+all but one taking a single step — the agent spawned inside the success radius
+and stopped. One physical arrival, counted six times. Collapsed to distinct
+goals the same comparison is 6 against 3, **p = 0.508.**
+
+Re-scored over distinct goals rather than subtasks:
+
+| comparison | metric | subtask-level | goal-level | survives |
+|---|---|---|---|---|
+| memory on/off | `ever_matched` | 48/12, p < 0.0001 | 22/8, **p = 0.016** | **yes** |
+| memory on/off | `steps_taken` | 45/22, p = 0.0067 | 19/11, p = 0.200 | no |
+| memory on/off | SR | 5/5, p = 1.000 | 3/4, p = 1.000 | null either way |
+| 512 vs 256 | `ever_matched` | 38/5, p < 0.0001 | 18/4, **p = 0.0043** | **yes** |
+| 512 vs 256 | `detector_in_view` | 38/7, p < 0.0001 | 19/5, **p = 0.0066** | **yes** |
+| 512 vs 256 | SR | 13/4, p = 0.049 | 6/3, p = 0.508 | no |
+| v2 vs v1 detector | all | p >= 0.10 | p >= 0.29 | no change |
+
+Two claims made earlier today are withdrawn: that resolution significantly
+raises SR, and that memory significantly reduces steps. Both were artifacts of
+counting one goal many times. What survives is the perception layer in both
+cases — memory roughly doubles the rate at which a candidate is recalled
+(p = 0.016) and 512 px does the same for matching and detection
+(p = 0.004, p = 0.007) — and no intervention has yet moved SR.
+
+The clustered column is conservative in the other direction: collapsing by
+`(episode_id, category)` also merges subtasks that genuinely differ, since the
+same mirror asked for by photo and by description exercises different matching
+paths. The truth sits between the two columns, and both are now printed, so
+the question cannot be quietly skipped. A cluster that flips both ways counts
+on both sides rather than being assigned to whichever arm is being argued for.
+
+This also retrospectively strengthens 6.54's conclusion. The Week 10 sweep was
+judged under-powered at n = 80 subtasks; those 80 subtasks carry far fewer
+distinct goals, so the grid was even further below the resolution of the
+instrument than that entry claimed.

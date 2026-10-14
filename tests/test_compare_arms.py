@@ -87,3 +87,59 @@ class TestPairRows:
 
     def test_an_empty_arm_pairs_to_nothing(self):
         assert pair_rows([_row("e0", 0)], []) == ([], [])
+
+
+class TestClusteredSignTest:
+    """GOAT-Bench episodes revisit the same object: 218 dev subtasks carry only
+    61 distinct (episode_id, category) goals, and episode 3 asks for the same
+    mirror 13 times. Treating those as independent inflates every sign test
+    run this term (6.63), so the comparison reports both."""
+
+    def test_repeated_goals_collapse_to_one_event(self):
+        from scripts.compare_arms import discordant_clusters
+
+        a = [_row("3", 0, cat="mirror", success="True"),
+             _row("3", 1, cat="mirror", success="True"),
+             _row("3", 2, cat="mirror", success="True")]
+        b = [_row("3", 0, cat="mirror"), _row("3", 1, cat="mirror"),
+             _row("3", 2, cat="mirror")]
+
+        a_only, b_only = discordant_clusters(a, b, "success")
+        assert (a_only, b_only) == (1, 0)
+
+    def test_distinct_goals_in_one_episode_stay_distinct(self):
+        from scripts.compare_arms import discordant_clusters
+
+        a = [_row("3", 0, cat="mirror", success="True"),
+             _row("3", 1, cat="plant", success="True")]
+        b = [_row("3", 0, cat="mirror"), _row("3", 1, cat="plant")]
+
+        assert discordant_clusters(a, b, "success") == (2, 0)
+
+    def test_the_same_category_in_different_episodes_stays_distinct(self):
+        from scripts.compare_arms import discordant_clusters
+
+        a = [_row("3", 0, cat="mirror", success="True"),
+             _row("6", 0, cat="mirror", success="True")]
+        b = [_row("3", 0, cat="mirror"), _row("6", 0, cat="mirror")]
+
+        assert discordant_clusters(a, b, "success") == (2, 0)
+
+    def test_a_goal_flipping_both_ways_counts_on_both_sides(self):
+        """Honest rather than convenient: a cluster whose subtasks disagree
+        among themselves is evidence for neither arm, and must not be silently
+        assigned to one."""
+        from scripts.compare_arms import discordant_clusters
+
+        a = [_row("3", 0, cat="mirror", success="True"), _row("3", 1, cat="mirror")]
+        b = [_row("3", 0, cat="mirror"), _row("3", 1, cat="mirror", success="True")]
+
+        assert discordant_clusters(a, b, "success") == (1, 1)
+
+    def test_concordant_rows_contribute_nothing(self):
+        from scripts.compare_arms import discordant_clusters
+
+        a = [_row("3", 0, cat="mirror", success="True")]
+        b = [_row("3", 0, cat="mirror", success="True")]
+
+        assert discordant_clusters(a, b, "success") == (0, 0)

@@ -862,8 +862,8 @@ Run the dev eval. Log everything to `outputs/dev_eval_<timestamp>/`:
 > criteria below are **3 of 3 met**. The third was recorded as failed for
 > weeks because it was measured on SR, where the delta is exactly 0.0 pp; on
 > `ever_matched`, the metric memory actually acts on, the same Week 9 data
-> gives p < 0.0001 with subtask 0 as a clean negative control (6.62). No new
-> runs were needed. See the dated updates below — the second supersedes the
+> gives p = 0.016 clustered by distinct goal, with subtask 0 as a clean
+> negative control (6.62, 6.63). No new runs were needed. See the dated updates below — the second supersedes the
 > first's sequencing argument.
 >
 > - [x] Memory-on vs memory-off run on identical episodes, paired by position,
@@ -1026,11 +1026,14 @@ Log everything in `outputs/ablations/`. Wandb project is very useful here — cr
       is four stages downstream of anything memory touches, and at 3.2% one
       subtask is 1.4 pp. On `ever_matched` — the metric memory acts on, which
       every subtask contributes to — the same paired 218 subtasks give
-      **43.6% against 27.1%, 48 discordant to 12, p < 0.0001**, with the
-      lifelong shape the claim requires: subtask 0 has nothing to inherit and
-      the arms agree (1 discordant of 30, p = 1.000), while subtasks 1+
-      separate by 18.6 points at **p = 0.000005**. The effect is present
-      exactly where the mechanism is and absent exactly where it is not.
+      **43.6% against 27.1%, 48 discordant to 12**, which is p < 0.0001 over
+      subtasks and **p = 0.016 clustered by distinct goal** (6.63; the 218
+      subtasks carry only 61 goals, so the uncorrected test overstates
+      itself). It survives the conservative reading, and it has the lifelong
+      shape the claim requires: subtask 0 has nothing to inherit and the arms
+      agree (1 discordant of 30), while subtasks 1+ carry the whole effect.
+      The effect is present exactly where the mechanism is and absent exactly
+      where it is not.
       This section's own update had suggested measuring on `ever_matched`;
       it had not been applied to the memory ablation written beside it.
 

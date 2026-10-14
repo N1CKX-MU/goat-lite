@@ -89,7 +89,7 @@ achievable with a heavyweight modular stack. It does not establish:
 |---|---|---|
 | 1 | Design and implement a complete modular navigation stack — detection, vision-language embedding, occupancy mapping, instance memory, multi-modal goal matching, planning and control — within a 4 GB VRAM budget | **Complete** |
 | 2 | Evaluate on GOAT-Bench `val_unseen` (36 scenes, 360 episodes, 2,669 subtasks); report SR and SPL per modality | In progress — harness built, dev-subset results pending |
-| 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | **Complete** — attenuation chain measured: matching 43.6% vs 27.1% (p < 0.0001), usable matches 12.8% vs 7.8% (p = 0.08), SR 3.2% vs 3.2% (p = 1.000), with subtask 0 as a negative control |
+| 3 | Quantify the lifelong effect: SR by subtask index, plus a memory-on vs memory-off ablation over identical episodes | **Complete** — attenuation chain measured: matching 43.6% vs 27.1% (p = 0.016 clustered by goal), usable matches 12.8% vs 7.8% (p = 0.08), SR 3.2% vs 3.2% (p = 1.000), with subtask 0 as a negative control |
 | 4 | Attribute end-to-end failure to individual components, producing a per-module failure taxonomy backed by measurements | In progress — 32 findings logged |
 | 5 | Quantify the data-availability ceiling that HM3D-Semantics imposes on the benchmark vocabulary | **Complete** — 59.2% |
 | 6 | Release a reproducible public repository with a documented engineering record, including negative results | Ongoing |
@@ -849,10 +849,14 @@ this goal) is the immediate output of memory, and every subtask contributes to
 it rather than only the successful 3.2%. On the same paired 218 subtasks, with
 no new runs:
 
-| metric | memory on | memory off | discordant | exact two-sided sign test |
-|---|---|---|---|---|
-| SR | 3.2% | 3.2% | 5 / 5 | p = 1.000 |
-| `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | **p < 0.0001** |
+| metric | memory on | memory off | discordant | p | clustered by goal |
+|---|---|---|---|---|---|
+| SR | 3.2% | 3.2% | 5 / 5 | 1.000 | 3 / 4, p = 1.000 |
+| `ever_matched` | **43.6%** | **27.1%** | **48 / 12** | < 0.0001 | **22 / 8, p = 0.016** |
+
+The final column matters and is explained in §4.6.1: the 218 subtasks carry
+only 61 distinct `(episode_id, category)` goals, so the subtask-level test
+overstates its evidence. The effect survives the conservative reading.
 
 The effect also has the shape the lifelong claim requires, which is what
 separates it from a nuisance difference between two runs:
@@ -881,22 +885,18 @@ off, p = 0.864. **Memory adds recall, not precision.**
 
 Carried through every stage, on the same pair of runs:
 
-| stage | memory on | memory off | discordant | p |
-|---|---|---|---|---|
-| matched anything | 43.6% | 27.1% | 48 / 12 | **< 0.0001** |
-| matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 |
-| scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 |
+| stage | memory on | memory off | discordant | p | clustered |
+|---|---|---|---|---|---|
+| matched anything | 43.6% | 27.1% | 48 / 12 | < 0.0001 | **0.016** |
+| matched within 1 m | 12.8% | 7.8% | 22 / 11 | 0.080 | — |
+| scored a success | 3.2% | 3.2% | 5 / 5 | 1.000 | 1.000 |
 
-A second consequence of memory is independently significant and carries the
-same control: the agent is **faster** with it. `steps_taken` averages 380 with
-memory against 422 without (45 subtasks shorter against 22 longer,
-**p = 0.0067**), and the share burning the whole 500-step budget falls from
-78.4% to 73.4%. Split by inheritance, subtask 0 is 1 against 0 (p = 1.000) and
-subtasks 1+ are 44 against 22 (**p = 0.0092**). Recall of candidates and step
-economy are different consequences of the same inherited map and instance
-database, and both appear only where there is something to inherit — one
-significant metric could be a lucky aggregation, two with clean controls is
-the mechanism.
+Memory also *appears* to make the agent faster — `steps_taken` averages 380
+with memory against 422 without, 45 subtasks shorter against 22 longer,
+p = 0.0067, with budget exhaustion falling from 78.4% to 73.4% — but that one
+does not survive clustering by goal (19 against 11, p = 0.200). The direction
+is right and the evidence is not there; it is reported here as suggestive
+rather than as a result.
 
 This chain is the central result of the project, and it is more informative
 than any single row of it. The lifelong memory does its job — it roughly
@@ -906,6 +906,31 @@ a metre from the object, so the advantage is already half gone by the
 usable-match stage and entirely gone by the time it reaches a score. Both
 numbers are true of the same two runs, and quoting either alone misrepresents
 the system.
+
+#### 4.6.1 Why these tests are clustered by goal
+
+The 218 dev subtasks carry only **61 distinct `(episode_id, category)`
+goals**. Episode 3 asks for the same mirror thirteen times, episode 6 the same
+mirror ten times, episode 9 the same refrigerator nine times; 157 of the 218
+subtasks repeat a goal already seen in their own episode. That is the
+benchmark working as intended — asking for one object by category, then by
+description, then by photograph is what makes it multi-modal — but it means
+subtasks are **not independent observations**, and a sign test over subtasks
+overstates its evidence.
+
+The cost of ignoring this is not hypothetical. Comparing a 512 px sensor
+against 256 px, the higher resolution won 13 subtasks to 4 (p = 0.049).
+Six of those thirteen were episode 3's single mirror, each ending at 0.86 m or
+0.93 m, five of them after a single step — the agent spawned inside the
+success radius and stopped. One physical arrival, counted six times. Collapsed
+to distinct goals the comparison is 6 to 3, **p = 0.508**.
+
+Every paired test in this report therefore carries both numbers. Clustering is
+conservative in the other direction — it also merges subtasks that genuinely
+differ, since the same mirror asked for by photograph and by description
+exercises different matching paths — so the truth lies between the two, and
+printing both prevents the question being quietly skipped. A goal whose
+subtasks flip both ways counts on both sides.
 
 #### Why the failures fail
 
@@ -1150,7 +1175,7 @@ matching, and deployment on physical hardware.
 
 ## Appendices *(to be assembled)*
 
-- **A — Engineering log.** 62 dated findings with the measurement that produced
+- **A — Engineering log.** 63 dated findings with the measurement that produced
   each, in `TECHNICAL_GUIDE.md` §6, including negative results and failed fixes.
 - **B — Reproduction.** Environment, commands and locally runnable episodes, in
   `docs/DEMO.md`.
