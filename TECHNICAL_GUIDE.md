@@ -3587,3 +3587,43 @@ directories that were indistinguishable from their contents — `results.csv`
 carries no `scene_id` and `summary.json` carried no settings — so the arms had
 to be told apart by directory name and paired positionally (6.54). Any run
 from here on says what produced it.
+
+#### 6.61 A 33% better detector buys no significant SR at 256 px
+
+The full 30-episode dev subset on the v2 detector, paired against the v1
+baseline (`dev_eval_run3_memon`) on all 218 subtasks with the row identity
+verified rather than assumed:
+
+| | v1 | v2 | discordant | exact two-sided sign test |
+|---|---|---|---|---|
+| SR | 3.2% (7/218) | 4.6% (10/218) | 7 to v2, 4 to v1 | **p = 0.549** |
+| `ever_matched` | 43.6% | 46.8% | 32 to v2, 25 to v1 | p = 0.427 |
+| `detector_in_view` | 13.3% | 18.8% | 29 to v2, 17 to v1 | p = 0.104 |
+| final distance (median) | 4.66 m | 4.24 m | 85 closer, 81 farther | p = 0.816 |
+
+**Nothing is significant.** SR rose by 1.4 points, which at this n is three
+subtasks, and the sign test says that is what noise looks like. By modality:
+category 4.9% → 6.2%, language 4.3% → 5.7%, image 0.0% → 1.5%.
+
+This is worth stating sharply because the detector really did improve: +33%
+mAP50 and +47% recall on held-out scenes (6.59), measured, replicated at both
+input sizes. The agent cannot convert it. That is the same shape as 6.50 — the
+fixes work and SR barely moves — and it is now the third time a measured
+component-level gain has failed to reach the end-to-end metric.
+
+The ordering of the p-values is the useful part. `detector_in_view` (p = 0.10)
+is the metric closest to the detector and moved most; `ever_matched` (p = 0.43)
+is one stage downstream and moved less; SR (p = 0.55) and final distance
+(p = 0.82) are furthest away and did not move at all. The signal attenuates
+with every stage between the detector and the score, which locates the
+bottleneck *after* perception rather than in it.
+
+6.60 supplies the likely reason the detector gain is this small in situ: at the
+agent's 256 px sensor the v2 detector scores 0.0867 mAP50, below what v1 scored
+at 512. The retraining is real but the sensor is spending it.
+
+Do not read this as "the rebuild was wasted". The v2 weights are better by
+every offline measure and strictly dominate v1 at both input sizes, so they are
+the right thing to carry into any later configuration — including a 512 one,
+where the gain is nearly twice as large in absolute terms (0.0994 → 0.1318
+versus 0.0650 → 0.0867). It is the 256 px pipeline that cannot spend it.
