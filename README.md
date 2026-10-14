@@ -17,8 +17,19 @@ throughout, 256×256 sensors, and every model choice. Peak usage stays under 3 G
 ## What this repository is for
 
 The interesting output is not a leaderboard number but an **attributed account
-of what fails** at a reduced operating point. Three results so far:
+of what fails** at a reduced operating point. Four results so far:
 
+- **The lifelong memory works, and does not reach the score.** Measured over
+  218 subtasks paired position-by-position, memory on against memory off, the
+  effect attenuates at every stage: the agent matches a candidate for its goal
+  43.6% of the time against 27.1% (p < 0.0001) and finishes in 380 steps
+  against 422 (p = 0.0067), but the matched node is no better localised
+  (4.07 m against 3.75 m, p = 0.864) and the success rate is identical, 3.2%
+  against 3.2% (p = 1.000). **Subtask 0 is a built-in negative control** —
+  nothing to inherit, and the two arms agree on 29 of 30 — so the effect
+  appears exactly where the mechanism is and nowhere else. Memory recalls
+  roughly twice as many candidates, faster, in the same wrong places.
+  §6.62.
 - **A data-availability ceiling.** Of the development subtasks, a large share
   cannot be won by *any* navigator, because the detector never fires on the goal
   — a property of HM3D-Semantics, not of the policy. See
@@ -29,7 +40,7 @@ of what fails** at a reduced operating point. Three results so far:
   no pitch action, 14.2% of subtasks have a goal that cannot be framed from
   anywhere a scoring stop could happen — every `rug` subtask among them. §6.35,
   §6.42.
-- **A per-component failure taxonomy**, with 59 dated findings in
+- **A per-component failure taxonomy**, with 62 dated findings in
   `TECHNICAL_GUIDE.md` §6, each paired with the measurement that produced it,
   **including the hypotheses that turned out to be wrong**.
 
